@@ -117,15 +117,27 @@ describe('FirmwareValidator', () => {
       expect(res.isValid).toBe(false);
       expect(res.errors.some((e) => e.field === 'files[0].sha256')).toBe(true);
     });
+
+    it('validates declared size / expectedSize in manifest', () => {
+      const invalidSize = {
+        name: 'Invalid Size',
+        version: '1.0.0',
+        chip: 'ESP32-S3',
+        files: [{ path: 'firmware.bin', offset: '0x10000', size: -50 }],
+      };
+      const res = FirmwareValidator.validateManifestSchema(invalidSize);
+      expect(res.isValid).toBe(false);
+      expect(res.errors.some((e) => e.field === 'files[0].size')).toBe(true);
+    });
   });
 
   describe('validatePackage', () => {
-    // Helper to generate a valid ESP32-S3 image header
-    const makeEspImage = (magic = 0xe9, chipId = 0x0009, size = 64): Uint8Array => {
+    // Helper to generate a valid ESP32-S3 image header per ESP-IDF specification
+    const makeEspImage = (magic = 0xe9, chipId = 0x09, size = 64, appendDigest = 0): Uint8Array => {
       const arr = new Uint8Array(Math.max(size, 24));
-      arr[0] = magic;
-      arr[12] = chipId & 0xff;
-      arr[13] = (chipId >> 8) & 0xff;
+      arr[0] = magic; // Byte 0: Magic byte 0xE9
+      arr[12] = chipId; // Byte 12: Chip ID (0x09 for ESP32-S3)
+      arr[23] = appendDigest; // Byte 23: append_digest flag (0 or 1)
       return arr;
     };
 
@@ -134,28 +146,46 @@ describe('FirmwareValidator', () => {
         name: 'Valid XIAO Package',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'builtin',
+        trustLevel: 'official_verified',
+        trustReason: 'Official test package',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 4096 + 3072 + 65536,
         files: [
           {
+            id: '1',
             fileName: 'bootloader.bin',
             offsetHex: '0x0',
             offsetNum: 0x0,
-            data: makeEspImage(0xe9, 0x0009, 4096),
+            data: makeEspImage(0xe9, 0x09, 4096),
             size: 4096,
+            sha256: 'a'.repeat(64),
+            md5: '0'.repeat(32),
+            isValid: true,
           },
           {
+            id: '2',
             fileName: 'partitions.bin',
             offsetHex: '0x8000',
             offsetNum: 0x8000,
             data: new Uint8Array(3072),
             size: 3072,
+            sha256: 'b'.repeat(64),
+            md5: '1'.repeat(32),
+            isValid: true,
           },
           {
+            id: '3',
             fileName: 'firmware.bin',
             offsetHex: '0x10000',
             offsetNum: 0x10000,
-            data: makeEspImage(0xe9, 0x0009, 65536),
+            data: makeEspImage(0xe9, 0x09, 65536),
             size: 65536,
+            sha256: 'c'.repeat(64),
+            md5: '2'.repeat(32),
+            isValid: true,
           },
         ],
       };
@@ -164,6 +194,41 @@ describe('FirmwareValidator', () => {
       expect(result.isValid).toBe(true);
       expect(result.errors).toHaveLength(0);
       expect(result.warnings).toHaveLength(0);
+      expect(result.flashCapacityStatus).toBe('verified');
+    });
+
+    it('treats unknown flash capacity as explicit safe state with warning', () => {
+      const pkg: FirmwarePackage = {
+        name: 'Package Without Known Flash',
+        version: '1.0.0',
+        chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Custom upload',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
+        totalSize: 4096,
+        files: [
+          {
+            id: '1',
+            fileName: 'bootloader.bin',
+            offsetHex: '0x0',
+            offsetNum: 0x0,
+            data: makeEspImage(0xe9, 0x09, 4096),
+            size: 4096,
+            sha256: 'a'.repeat(64),
+            md5: '0'.repeat(32),
+            isValid: true,
+          },
+        ],
+      };
+
+      // detectedCapacityBytes is null/undefined
+      const res = FirmwareValidator.validatePackage(pkg, null, 'ESP32-S3');
+      expect(res.isValid).toBe(true);
+      expect(res.flashCapacityStatus).toBe('unknown');
+      expect(res.warnings.some((w) => w.field === 'flash_capacity')).toBe(true);
     });
 
     it('rejects empty package files', () => {
@@ -171,6 +236,12 @@ describe('FirmwareValidator', () => {
         name: 'Empty Package',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Empty',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 0,
         files: [],
       };
@@ -184,14 +255,24 @@ describe('FirmwareValidator', () => {
         name: 'Zero Byte File',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Zero',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 0,
         files: [
           {
+            id: '1',
             fileName: 'empty.bin',
             offsetHex: '0x0',
             offsetNum: 0x0,
             data: new Uint8Array(0),
             size: 0,
+            sha256: '',
+            md5: '',
+            isValid: false,
           },
         ],
       };
@@ -205,14 +286,24 @@ describe('FirmwareValidator', () => {
         name: 'Unaligned',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Unaligned',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 100,
         files: [
           {
+            id: '1',
             fileName: 'bad_offset.bin',
             offsetHex: '0x1002',
             offsetNum: 0x1002,
             data: new Uint8Array(100),
             size: 100,
+            sha256: '',
+            md5: '',
+            isValid: true,
           },
         ],
       };
@@ -226,21 +317,35 @@ describe('FirmwareValidator', () => {
         name: 'Overlapping Package',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Overlap',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 2048,
         files: [
           {
+            id: '1',
             fileName: 'first.bin',
             offsetHex: '0x8000',
             offsetNum: 0x8000,
-            data: new Uint8Array(0x1000), // extends from 0x8000 to 0x9000
+            data: new Uint8Array(0x1000), // extends 0x8000 to 0x9000
             size: 0x1000,
+            sha256: '',
+            md5: '',
+            isValid: true,
           },
           {
+            id: '2',
             fileName: 'second.bin',
-            offsetHex: '0x8800', // starts inside first.bin (0x8800 < 0x9000)
+            offsetHex: '0x8800', // starts at 0x8800 (< 0x9000)
             offsetNum: 0x8800,
             data: new Uint8Array(0x1000),
             size: 0x1000,
+            sha256: '',
+            md5: '',
+            isValid: true,
           },
         ],
       };
@@ -257,55 +362,145 @@ describe('FirmwareValidator', () => {
         name: 'Oversized Package',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Oversized',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '4MB',
         totalSize: 1024,
         files: [
           {
+            id: '1',
             fileName: 'huge.bin',
             offsetHex: '0x3FFF00',
             offsetNum: 0x3fff00,
-            data: new Uint8Array(0x2000), // extends past 0x400000 (4MB)
+            data: new Uint8Array(0x2000), // extends past 0x400000
             size: 0x2000,
+            sha256: '',
+            md5: '',
+            isValid: true,
           },
         ],
       };
       const res = FirmwareValidator.validatePackage(pkg, flashCapacity);
       expect(res.isValid).toBe(false);
+      expect(res.flashCapacityStatus).toBe('exceeded');
       expect(res.errors.some((e) => e.field === 'flash_capacity')).toBe(true);
-      expect(res.errors[0].message).toContain('exceeds detected flash capacity');
     });
 
-    it('issues warnings for invalid ESP32 magic byte or wrong chip_id in header', () => {
+    it('HARD ERRORS on invalid ESP32 magic byte (not a warning)', () => {
       const pkg: FirmwarePackage = {
-        name: 'Wrong Chip Header',
+        name: 'Invalid Magic Byte',
         version: '1.0.0',
         chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Corrupt magic',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
         totalSize: 64,
         files: [
           {
+            id: '1',
             fileName: 'bootloader.bin',
             offsetHex: '0x0',
             offsetNum: 0x0,
-            data: makeEspImage(0xaa, 0x0005, 64), // Magic 0xAA (expected 0xE9), Chip 0x0005 (ESP32-C3)
+            data: makeEspImage(0xaa, 0x09, 64), // Magic 0xAA (expected 0xE9)
             size: 64,
+            sha256: '',
+            md5: '',
+            isValid: true,
           },
         ],
       };
       const res = FirmwareValidator.validatePackage(pkg, 8 * 1024 * 1024, 'ESP32-S3');
-      expect(res.isValid).toBe(true); // Warnings do not invalidate package
-      expect(res.warnings.some((w) => w.field.includes('header'))).toBe(true);
+      expect(res.isValid).toBe(false); // MUST BE HARD ERROR
+      expect(res.errors.some((e) => e.message.includes('missing mandatory ESP32 image magic byte'))).toBe(true);
+    });
+
+    it('HARD ERRORS on mismatched chip_id in executable header (not a warning)', () => {
+      const pkg: FirmwarePackage = {
+        name: 'Wrong Chip ID',
+        version: '1.0.0',
+        chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Wrong architecture',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
+        totalSize: 64,
+        files: [
+          {
+            id: '1',
+            fileName: 'app.bin',
+            offsetHex: '0x10000',
+            offsetNum: 0x10000,
+            data: makeEspImage(0xe9, 0x05, 64), // Chip 0x05 (ESP32-C3) instead of 0x09 (ESP32-S3)
+            size: 64,
+            sha256: '',
+            md5: '',
+            isValid: true,
+          },
+        ],
+      };
+      const res = FirmwareValidator.validatePackage(pkg, 8 * 1024 * 1024, 'ESP32-S3');
+      expect(res.isValid).toBe(false); // MUST BE HARD ERROR
+      expect(res.errors.some((e) => e.message.includes('Chip architecture mismatch'))).toBe(true);
+    });
+
+    it('HARD ERRORS on invalid append_digest field in header', () => {
+      const pkg: FirmwarePackage = {
+        name: 'Bad Append Digest',
+        version: '1.0.0',
+        chip: 'ESP32-S3',
+        source: 'custom',
+        trustLevel: 'unverified_custom',
+        trustReason: 'Corrupt header',
+        flashMode: 'dio',
+        flashFreq: '80m',
+        flashSize: '8MB',
+        totalSize: 64,
+        files: [
+          {
+            id: '1',
+            fileName: 'bootloader.bin',
+            offsetHex: '0x0',
+            offsetNum: 0x0,
+            data: makeEspImage(0xe9, 0x09, 64, 0xff), // appendDigest = 0xFF (invalid, must be 0 or 1)
+            size: 64,
+            sha256: '',
+            md5: '',
+            isValid: true,
+          },
+        ],
+      };
+      const res = FirmwareValidator.validatePackage(pkg, 8 * 1024 * 1024, 'ESP32-S3');
+      expect(res.isValid).toBe(false);
+      expect(res.errors.some((e) => e.message.includes('Invalid append_digest header field'))).toBe(true);
     });
   });
 
   describe('parseFlashCapacityBytes', () => {
-    it('correctly maps flash capacity strings to byte quantities', () => {
+    it('correctly maps known flash capacity strings to byte quantities', () => {
       expect(FirmwareValidator.parseFlashCapacityBytes('4MB')).toBe(4 * 1024 * 1024);
       expect(FirmwareValidator.parseFlashCapacityBytes('8MB')).toBe(8 * 1024 * 1024);
       expect(FirmwareValidator.parseFlashCapacityBytes('16MB')).toBe(16 * 1024 * 1024);
       expect(FirmwareValidator.parseFlashCapacityBytes('32MB')).toBe(32 * 1024 * 1024);
       expect(FirmwareValidator.parseFlashCapacityBytes('2MB')).toBe(2 * 1024 * 1024);
       expect(FirmwareValidator.parseFlashCapacityBytes('1MB')).toBe(1 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes(undefined)).toBe(8 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('unknown')).toBe(8 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('512KB')).toBe(512 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('256KB')).toBe(256 * 1024);
+    });
+
+    it('returns null for undefined, empty, or unknown strings (NO 8MB fallback)', () => {
+      expect(FirmwareValidator.parseFlashCapacityBytes(undefined)).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('   ')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('unknown')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('INVALID_SIZE')).toBeNull();
     });
   });
 });

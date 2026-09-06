@@ -38,10 +38,11 @@ export class FirmwareService {
       const md5 = computeMD5(uint8);
       const sha256 = await computeSHA256(uint8);
 
-      // Verify file size if specified in manifest
-      if (fileEntry.size !== undefined && uint8.byteLength !== fileEntry.size) {
+      // Verify file size if specified in manifest (support size or expectedSize)
+      const expectedSize = fileEntry.size ?? fileEntry.expectedSize;
+      if (expectedSize !== undefined && uint8.byteLength !== expectedSize) {
         throw new Error(
-          `Payload size mismatch for "${fileEntry.path}". Expected ${fileEntry.size} bytes, but received ${uint8.byteLength} bytes.`
+          `Payload size mismatch for "${fileEntry.path}". Expected ${expectedSize} bytes, but received ${uint8.byteLength} bytes.`
         );
       }
 
@@ -84,10 +85,14 @@ export class FirmwareService {
       files: binaries,
       totalSize,
       source: 'builtin',
+      trustLevel: 'official_verified',
+      trustReason:
+        'Official built-in release candidate camera firmware verified with pinned SHA-256 signatures.',
     };
 
     // Run deep structural package validation
     const valResult = FirmwareValidator.validatePackage(pkg, 8 * 1024 * 1024, 'ESP32-S3');
+    pkg.flashCapacityStatus = valResult.flashCapacityStatus;
     if (!valResult.isValid) {
       throw new Error(valResult.errors.map((e) => e.message).join('\n'));
     }
@@ -142,10 +147,11 @@ export class FirmwareService {
       const md5 = computeMD5(uint8);
       const sha256 = await computeSHA256(uint8);
 
-      // Verify file size if specified
-      if (entry.size !== undefined && uint8.byteLength !== entry.size) {
+      // Verify file size if specified (support size or expectedSize)
+      const expectedSize = entry.size ?? entry.expectedSize;
+      if (expectedSize !== undefined && uint8.byteLength !== expectedSize) {
         throw new Error(
-          `Payload size mismatch for "${matchedFile.name}". Expected ${entry.size} bytes, but received ${uint8.byteLength} bytes.`
+          `Payload size mismatch for "${matchedFile.name}". Expected ${expectedSize} bytes, but received ${uint8.byteLength} bytes.`
         );
       }
 
@@ -188,9 +194,13 @@ export class FirmwareService {
       files: binaries,
       totalSize,
       source: 'manifest',
+      trustLevel: 'unverified_custom',
+      trustReason:
+        'Custom manifest package. Flash memory boundaries and binary executable integrity must be verified by the user.',
     };
 
-    const valResult = FirmwareValidator.validatePackage(pkg, undefined, pkg.chip);
+    const valResult = FirmwareValidator.validatePackage(pkg, null, pkg.chip);
+    pkg.flashCapacityStatus = valResult.flashCapacityStatus;
     if (!valResult.isValid) {
       throw new Error(valResult.errors.map((e) => e.message).join('\n'));
     }
@@ -253,9 +263,13 @@ export class FirmwareService {
       files: binaries,
       totalSize,
       source: 'custom',
+      trustLevel: 'unverified_custom',
+      trustReason:
+        'Custom manual binary upload. Flash offsets and memory boundaries must be carefully verified.',
     };
 
-    const valResult = FirmwareValidator.validatePackage(pkg, undefined, 'ESP32-S3');
+    const valResult = FirmwareValidator.validatePackage(pkg, null, 'ESP32-S3');
+    pkg.flashCapacityStatus = valResult.flashCapacityStatus;
     if (!valResult.isValid) {
       throw new Error(valResult.errors.map((e) => e.message).join('\n'));
     }

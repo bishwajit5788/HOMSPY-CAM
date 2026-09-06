@@ -4,6 +4,8 @@ import type { FirmwarePackage } from '../../types/firmware';
 import { esp32Service } from '../esp32/esp32Service';
 import { logService } from '../logger/logService';
 import { FirmwareValidator } from '../firmware/firmwareValidator';
+import { isValidTransition } from '../state/stateTransitions';
+import { portCoordinator } from '../port/portCoordinator';
 
 type StateListener = (details: StateDetails) => void;
 type ProgressListener = (progress: FlashProgress) => void;
@@ -16,6 +18,7 @@ export class FlashService {
   private activePort: SerialPort | null = null;
   private detectedChip: ChipInfo | null = null;
   private isOperationActive = false;
+  private currentOperationId = 0;
 
   private stateListeners: Set<StateListener> = new Set();
   private progressListeners: Set<ProgressListener> = new Set();
@@ -49,6 +52,14 @@ export class FlashService {
     return this.isOperationActive;
   }
 
+  public get port(): SerialPort | null {
+    return this.activePort;
+  }
+
+  public get operationId(): number {
+    return this.currentOperationId;
+  }
+
   public subscribeState(listener: StateListener): () => void {
     this.stateListeners.add(listener);
     listener(this.getStateDetails());
@@ -70,16 +81,45 @@ export class FlashService {
     };
   }
 
+  /**
+   * Generates a new monotonic operation token.
+   */
+  private nextOperationId(): number {
+    return ++this.currentOperationId;
+  }
+
+  /**
+   * Checks if an async completion belongs to the currently active operation.
+   */
+  private isCurrentOperation(opId: number): boolean {
+    return this.currentOperationId === opId;
+  }
+
+  /**
+   * Transitions state strictly according to VALID_STATE_TRANSITIONS table.
+   */
   private setState(
     newState: DeviceState,
     message: string,
     error?: string,
     troubleshooting: string[] = []
   ): void {
-    this.currentState = newState;
-    this.stateMessage = message;
-    this.stateError = error;
-    this.troubleshootingSteps = troubleshooting;
+    if (!isValidTransition(this.currentState, newState)) {
+      logService.addLog(
+        `State machine guarded: Transition from "${this.currentState}" to "${newState}" is not permitted.`,
+        'error'
+      );
+      // Route invalid jumps safely to ERROR state
+      this.currentState = 'ERROR';
+      this.stateMessage = `Illegal state transition attempted from ${this.currentState} to ${newState}.`;
+      this.stateError = 'State machine transition violation';
+      this.troubleshootingSteps = ['Disconnect and restart the operation from DISCONNECTED state.'];
+    } else {
+      this.currentState = newState;
+      this.stateMessage = message;
+      this.stateError = error;
+      this.troubleshootingSteps = troubleshooting;
+    }
 
     const details = this.getStateDetails();
     this.stateListeners.forEach((fn) => fn(details));
@@ -91,24 +131,36 @@ export class FlashService {
   }
 
   /**
-   * Connects to the device port and checks ESP32-S3 bootloader state.
+   * Connects to the device port and synchronizes with the ESP32-S3 ROM bootloader.
    */
   public async connectDevice(port: SerialPort): Promise<ChipInfo> {
     if (this.isOperationActive) {
       throw new Error('Another hardware operation is currently in progress. Please wait.');
     }
 
+    const opId = this.nextOperationId();
     this.isOperationActive = true;
     this.activePort = port;
-    this.setState('CONNECTING', 'Establishing connection to serial port...');
 
     try {
+      // Acquire exclusive lease from PortCoordinator
+      await portCoordinator.acquireLease('flasher', port);
+
+      this.setState('CONNECTING', 'Establishing connection to serial port...');
+
       this.setState('CONNECTED', 'Port opened. Detecting ESP32-S3 ROM bootloader...');
       this.setState('DETECTING', 'Sending sync frames to ROM bootloader...');
 
       const chip = await esp32Service.connectAndDetect(port, 115200, () => {
         this.handleDeviceLost();
       });
+
+      // Discard completion if operation was cancelled or superseded
+      if (!this.isCurrentOperation(opId)) {
+        logService.addLog(`Discarding stale connection result from operation #${opId}`, 'system');
+        await portCoordinator.releaseLease('flasher');
+        return chip;
+      }
 
       this.detectedChip = chip;
 
@@ -126,6 +178,7 @@ export class FlashService {
       );
       return chip;
     } catch (err: unknown) {
+      await portCoordinator.releaseLease('flasher');
       const error = err as Error;
       this.setState(
         'ERROR',
@@ -147,27 +200,33 @@ export class FlashService {
   }
 
   /**
-   * Internal handler called if the physical USB port disconnects unexpectedly.
+   * Internal handler called if physical USB disconnects unexpectedly.
    */
   private handleDeviceLost(): void {
+    const opId = this.nextOperationId();
     logService.addLog('CRITICAL: USB cable disconnected during active session.', 'error');
     this.activePort = null;
     this.detectedChip = null;
     this.isOperationActive = false;
+    void portCoordinator.releaseLease('flasher');
+
     this.updateProgress({
       stage: 'failed',
       stageText: 'USB device disconnected',
     });
-    this.setState(
-      'ERROR',
-      'USB device disconnected unexpectedly.',
-      'The serial connection was severed because the device was unplugged or reset.',
-      [
-        'Reconnect the USB cable securely.',
-        'If flashing was interrupted, place the board back into bootloader mode (Hold B, click R, release B).',
-        'Click "Connect ESP32" to re-establish connection.',
-      ]
-    );
+
+    if (this.isCurrentOperation(opId)) {
+      this.setState(
+        'ERROR',
+        'USB device disconnected unexpectedly.',
+        'The serial connection was severed because the device was unplugged or reset.',
+        [
+          'Reconnect the USB cable securely.',
+          'If flashing was interrupted, place the board back into bootloader mode (Hold B, click R, release B).',
+          'Click "Connect ESP32" to re-establish connection.',
+        ]
+      );
+    }
   }
 
   /**
@@ -178,33 +237,38 @@ export class FlashService {
       throw new Error('An operation is already in progress. Please wait.');
     }
 
-    if (this.currentState !== 'BOOTLOADER_READY' && this.currentState !== 'FLASH_COMPLETE') {
-      throw new Error('Device must be connected and in BOOTLOADER_READY state to erase.');
-    }
-
+    const opId = this.nextOperationId();
     this.isOperationActive = true;
-    this.setState('ERASING', 'Erasing entire flash memory...');
+    this.setState('ERASING', 'Transmitting full chip erase command (timeout 45s)...');
     this.updateProgress({
       stage: 'erasing',
-      stageText: 'Erasing entire flash memory (this may take up to 30s)...',
+      stageText: 'Erasing target flash memory (this may take up to 45 seconds)...',
       percentage: 20,
     });
 
     try {
-      await esp32Service.eraseFlash();
+      await esp32Service.eraseChip();
+
+      if (!this.isCurrentOperation(opId)) return;
+
       this.updateProgress({
         stage: 'complete',
-        stageText: 'Flash erase complete.',
+        stageText: 'Chip erase complete! Ready for firmware flashing.',
         percentage: 100,
       });
-      this.setState('BOOTLOADER_READY', 'Flash memory erased successfully. Ready to flash.');
+
+      this.setState('BOOTLOADER_READY', 'Full flash memory successfully erased. Bootloader ready.');
     } catch (err: unknown) {
       const error = err as Error;
       this.setState(
         'ERROR',
-        'Flash erase operation failed.',
+        'Failed to erase flash memory.',
         error.message || String(error),
-        ['Ensure the USB cable is securely connected.', 'Re-enter bootloader mode and retry.']
+        [
+          'Check that the board remained in bootloader mode during the erase.',
+          'Verify that the USB cable was not disconnected.',
+          'Retry erasing, or reconnect the device.',
+        ]
       );
       throw error;
     } finally {
@@ -213,41 +277,59 @@ export class FlashService {
   }
 
   /**
-   * Flashes firmware package to the device with rigorous pre-flash validation and safety checks.
+   * Flashes the selected firmware package to the connected device.
    */
-  public async flashPackage(
-    pkg: FirmwarePackage,
-    config: FlashConfig
-  ): Promise<void> {
+  public async flashPackage(pkg: FirmwarePackage, config: FlashConfig): Promise<void> {
+    return this.startFlashing(pkg, config);
+  }
+
+  /**
+   * Flashes the selected firmware package to the connected device.
+   */
+  public async startFlashing(pkg: FirmwarePackage, config: FlashConfig): Promise<void> {
     if (this.isOperationActive) {
-      throw new Error('Another flashing or hardware operation is currently running.');
+      throw new Error('An operation is already in progress. Please wait.');
     }
 
-    if (!this.activePort || (this.currentState !== 'BOOTLOADER_READY' && this.currentState !== 'FLASH_COMPLETE')) {
-      throw new Error('Device must be connected and ready in bootloader mode before flashing.');
+    if (!this.detectedChip) {
+      throw new Error('No ESP32 device connected. Connect to your device first.');
     }
 
+    const opId = this.nextOperationId();
     this.isOperationActive = true;
 
-    // 1. Pre-flash validation phase (Phase 3 & 5 & 13)
-    this.setState('VALIDATING', `Validating firmware package "${pkg.name}"...`);
+    // 1. Validation Phase
+    this.setState('VALIDATING', 'Validating firmware package integrity and memory bounds...');
     this.updateProgress({
-      stage: 'preparing',
-      stageText: 'Validating firmware package integrity, offsets, and boundaries...',
-      percentage: 0,
-      writtenBytes: 0,
-      totalBytes: pkg.totalSize,
+      stage: 'validating',
+      stageText: 'Validating binary offsets, SHA-256 integrity, and headers...',
+      percentage: 2,
     });
 
     const flashCapacityBytes = FirmwareValidator.parseFlashCapacityBytes(
-      this.detectedChip?.flashSize || config.flashSize
+      this.detectedChip.flashSize || config.flashSize
     );
+
+    if (flashCapacityBytes === null) {
+      logService.addLog(
+        'Notice: Target flash capacity is UNKNOWN. Memory boundary safety cannot be verified automatically.',
+        'flasher'
+      );
+      if (pkg.trustLevel === 'unverified_custom') {
+        logService.addLog(
+          'WARNING: Flashing unverified custom firmware with unknown flash capacity.',
+          'error'
+        );
+      }
+    }
 
     const validationResult = FirmwareValidator.validatePackage(
       pkg,
       flashCapacityBytes,
-      this.detectedChip?.chipName || 'ESP32-S3'
+      this.detectedChip.chipName || 'ESP32-S3'
     );
+
+    pkg.flashCapacityStatus = validationResult.flashCapacityStatus;
 
     if (!validationResult.isValid) {
       const errorSummary = validationResult.errors.map((e) => e.message).join('\n');
@@ -258,7 +340,10 @@ export class FlashService {
         [
           'Check the binary offsets to ensure they do not overlap.',
           'Verify that all binary files are non-empty and formatted correctly.',
-          `Ensure the total firmware size does not exceed detected flash capacity (${Math.round(flashCapacityBytes / (1024 * 1024))} MB).`,
+          'Ensure executable images start with magic byte 0xE9 and chip ID 0x09.',
+          flashCapacityBytes
+            ? `Ensure total size does not exceed flash capacity (${Math.round(flashCapacityBytes / (1024 * 1024))} MB).`
+            : 'Verify flash size before flashing custom payloads.',
         ]
       );
       this.isOperationActive = false;
@@ -284,6 +369,7 @@ export class FlashService {
           percentage: 5,
         });
         await esp32Service.eraseFlash();
+        if (!this.isCurrentOperation(opId)) return;
       }
 
       // 3. Flashing phase
@@ -305,6 +391,7 @@ export class FlashService {
         pkg.files,
         config,
         (fileIdx, writtenInFile, _totalInFile, fileName) => {
+          if (!this.isCurrentOperation(opId)) return;
           const now = Date.now();
           const elapsedSecs = Math.max(0.1, (now - startTime) / 1000);
 
@@ -330,15 +417,19 @@ export class FlashService {
           });
         },
         (fileName, hash) => {
-          logService.addLog(`[VERIFIED] Segment ${fileName} verified with hash ${hash}.`, 'flasher');
+          if (this.isCurrentOperation(opId)) {
+            logService.addLog(`[VERIFIED] Segment ${fileName} verified with hash ${hash}.`, 'flasher');
+          }
         }
       );
 
+      if (!this.isCurrentOperation(opId)) return;
+
       // 4. Verification phase
-      this.setState('VERIFYING', 'Confirming on-chip MD5 checksums...');
+      this.setState('VERIFYING', 'Confirming on-chip SPI flash readback MD5 checksums...');
       this.updateProgress({
         stage: 'verifying',
-        stageText: 'Confirming on-chip MD5 checksum verification...',
+        stageText: 'Confirming on-chip SPI flash readback checksum verification...',
         percentage: 98,
       });
 
@@ -351,6 +442,8 @@ export class FlashService {
       });
 
       await esp32Service.resetDevice();
+
+      if (!this.isCurrentOperation(opId)) return;
 
       const totalTime = Math.max(0.1, (Date.now() - startTime) / 1000);
       const finalSpeed = Math.round((totalPayloadBytes / 1024) / totalTime);
@@ -366,7 +459,7 @@ export class FlashService {
 
       this.setState(
         'FLASH_COMPLETE',
-        `Successfully flashed ${pkg.name}! Write & MD5 verification passed.`
+        `Successfully flashed ${pkg.name}! Write & on-chip SPI flash readback MD5 verification passed.`
       );
 
       logService.addLog(
@@ -374,7 +467,7 @@ export class FlashService {
         'flasher'
       );
       logService.addLog(
-        'VERIFY SUCCESS: On-chip checksum verification confirmed by ROM flasher.',
+        'VERIFY SUCCESS: SPI Flash readback MD5 matched source image. On-chip SPI bus integrity confirmed.',
         'flasher'
       );
       logService.addLog(
@@ -417,8 +510,10 @@ export class FlashService {
    * Disconnects the flashing service and resets state.
    */
   public async disconnect(): Promise<void> {
+    this.nextOperationId();
     this.setState('DISCONNECTING', 'Closing flasher transport...');
     await esp32Service.disconnect();
+    await portCoordinator.releaseLease('flasher');
     this.activePort = null;
     this.detectedChip = null;
     this.isOperationActive = false;

@@ -1,7 +1,7 @@
 {
   "name": "homspy-cam",
   "private": true,
-  "version": "0.9.0-rc.1",
+  "version": "0.9.0-rc.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify:firmware": "node ./scripts/verifyFirmware.js",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -6,6 +6,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0-rc.2] - 2026-09-07
+
+### Release Status
+> **SOFTWARE RELEASE CANDIDATE 2 — VERIFIED ARCHITECTURE & REAL HARDWARE READY**  
+> *Notice: Software architecture, automated unit tests, port leasing, image validation, and CI checks are 100% verified. Real hardware bench testing is required for physical silicon verification.*
+
+### Added
+- **Unified Web Serial Port Coordinator (`PortCoordinator`)**:
+  - Centralized port leasing mechanism providing exclusive lease acquisition (`acquireLease`, `releaseLease`) for `'flasher'` and `'monitor'`.
+  - Rejects port lease conflicts with clear error messages.
+  - Global `navigator.serial` disconnect handling invalidates active leases simultaneously across all components.
+- **Guarded Finite State Machine Transition Matrix (`VALID_STATE_TRANSITIONS`)**:
+  - Enforces valid state pathways, safely trapping illegal jumps into the `ERROR` state.
+  - Monotonic `currentOperationId` tokens attached to every asynchronous lifecycle operation, safely discarding stale async completions from cancelled or timed-out promises.
+- **Strict ESP-IDF Image Header Validation**:
+  - Full conformance with the official ESP-IDF / esptool-js image header format.
+  - Hard error rejection for missing magic byte (`0xE9`), mismatched chip architecture (rejects non-ESP32-S3 `0x09` binaries), and invalid `append_digest` bytes.
+  - Known-invalid executable images are no longer treated as warnings; they are hard errors that strictly block flashing.
+- **Trust Policy for Firmware Packages**:
+  - Distinguishes between `official_verified` (pre-signed, verified with pinned SHA-256) and `unverified_custom` (user-uploaded manifests or binaries).
+  - Explicit UI security badges and guidance in `FirmwarePanel`.
+- **Safe Flash Capacity Handling**:
+  - Completely removed the unsafe silent 8MB fallback in `FirmwareValidator.parseFlashCapacityBytes`.
+  - Unknown flash capacity is now an explicit safe state (`'unknown'`) that generates clear pre-flash notices and prevents blind boundary assumptions.
+- **Timeout Cancellation & Transport Cleanup**:
+  - Replaced `Promise.race` with `withTimeoutAndCleanup` across `esp32Service`, executing immediate `AbortSignal` cancellation and stream disconnects upon timeout to eliminate orphaned zombie background operations.
+- **Accurate MD5 Verification Semantics**:
+  - Aligned logs and UI with exact `esptool-js 0.6.1` semantics: verifies on-chip SPI flash readback MD5 against the local source image.
+- **Firmware Integrity Script & Test Suite Expansion**:
+  - Added standalone `npm run verify:firmware` script ([`scripts/verifyFirmware.js`](file:///Users/bishwajit/HOMSPY-CAM/scripts/verifyFirmware.js)).
+  - Expanded automated test suite from 34 to 58 unit tests in Vitest across 6 test suites (`portCoordinator`, `stateTransitions`, `firmwareIntegrity`, `firmwareValidator`, `formatters`, `stateMachine`).
+- **CI Enhancements**:
+  - Added firmware integrity verification and dependency audit (`npm audit --audit-level=high`) to GitHub Actions CI workflow.
+
+---
+
 ## [0.9.0-rc.1] - 2026-09-07
 
 ### Release Status

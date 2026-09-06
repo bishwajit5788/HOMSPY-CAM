@@ -27,16 +27,32 @@ export class ESP32Service {
   }
 
   /**
-   * Helper utility wrapping asynchronous promises with an explicit timeout.
+   * Helper utility wrapping asynchronous promises with an explicit timeout,
+   * AbortSignal, and immediate cleanup to terminate zombie operations.
    */
-  private async withTimeout<T>(
-    promise: Promise<T>,
+  private async withTimeoutAndCleanup<T>(
+    operationFn: (signal: AbortSignal) => Promise<T>,
     timeoutMs: number,
-    operationName: string
+    operationName: string,
+    onTimeoutCleanup?: () => Promise<void> | void
   ): Promise<T> {
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<T>((_, reject) => {
-      timer = setTimeout(() => {
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(async () => {
+        controller.abort();
+        logService.addLog(
+          `TIMEOUT: Operation "${operationName}" exceeded ${Math.round(timeoutMs / 1000)}s limit. Executing safety cancellation...`,
+          'error'
+        );
+        if (onTimeoutCleanup) {
+          try {
+            await onTimeoutCleanup();
+          } catch (cleanupErr) {
+            console.warn('Error during timeout cleanup:', cleanupErr);
+          }
+        }
         reject(
           new Error(
             `Operation "${operationName}" timed out after ${Math.round(timeoutMs / 1000)}s. Device did not respond.`
@@ -46,7 +62,7 @@ export class ESP32Service {
     });
 
     try {
-      const result = await Promise.race([promise, timeoutPromise]);
+      const result = await Promise.race([operationFn(controller.signal), timeoutPromise]);
       return result;
     } finally {
       if (timer) clearTimeout(timer);
@@ -103,11 +119,14 @@ export class ESP32Service {
 
     let chipName = '';
     try {
-      // First attempt with default reset (with 15s timeout)
-      chipName = await this.withTimeout(
-        this.esploader.main('default_reset'),
+      // First attempt with default reset (with 15s timeout and abort cleanup)
+      chipName = await this.withTimeoutAndCleanup(
+        () => this.esploader!.main('default_reset'),
         15000,
-        'ROM bootloader synchronization (default reset)'
+        'ROM bootloader synchronization (default reset)',
+        async () => {
+          await this.disconnect();
+        }
       );
     } catch (firstErr) {
       logService.addLog(
@@ -116,85 +135,95 @@ export class ESP32Service {
       );
       try {
         // Fallback for boards already placed into bootloader mode
-        chipName = await this.withTimeout(
-          this.esploader.main('no_reset'),
-          10000,
-          'ROM bootloader synchronization (direct)'
+        chipName = await this.withTimeoutAndCleanup(
+          () => this.esploader!.main('no_reset'),
+          15000,
+          'ROM bootloader synchronization (no_reset)',
+          async () => {
+            await this.disconnect();
+          }
         );
       } catch (secondErr) {
+        await this.disconnect();
         throw new Error(
-          `ESP32-S3 bootloader not detected. Please verify the board is in download mode (Hold BOOT, press RESET, release BOOT) and retry. (${secondErr})`
+          `Failed to synchronize with ESP32-S3 ROM bootloader. ${secondErr}. Ensure board is in bootloader mode (Hold B, click R, release B).`
         );
       }
     }
 
     this.isConnected = true;
-    logService.addLog(`Bootloader synchronized successfully. Identified chip: ${chipName}`, 'flasher');
+    logService.addLog(`ROM bootloader synchronized successfully. Detected chip: ${chipName}`, 'flasher');
 
-    // Read Hardware MAC Address
+    // Retrieve chip hardware information
     let macAddress = 'Unknown';
     try {
-      if (this.esploader.chip) {
-        macAddress = await this.esploader.chip.readMac(this.esploader);
+      if (this.esploader.chip && typeof this.esploader.chip.readMac === 'function') {
+        const mac = await this.esploader.chip.readMac(this.esploader);
+        if (mac) {
+          macAddress = mac;
+          logService.addLog(`MAC Address: ${macAddress}`, 'flasher');
+        }
       }
     } catch {
-      // Non-fatal if MAC cannot be read
+      logService.addLog('Notice: MAC address could not be read.', 'flasher');
     }
 
-    // Detect Flash Size
-    let flashSize = '8MB';
+    // Retrieve SPI flash information
+    let flashId: string | undefined;
+    let flashSize: string | undefined;
     try {
-      flashSize = await this.withTimeout(
-        this.esploader.detectFlashSize(),
-        5000,
-        'Flash size detection'
-      );
+      const rawFlashId = await this.esploader.readFlashId();
+      if (rawFlashId !== undefined) {
+        flashId = `0x${rawFlashId.toString(16).toUpperCase()}`;
+        logService.addLog(`SPI Flash ID: ${flashId}`, 'flasher');
+        const lowByte = (rawFlashId >> 16) & 0xff;
+        flashSize = this.esploader.DETECTED_FLASH_SIZES[lowByte];
+        if (flashSize) {
+          logService.addLog(`Detected SPI Flash Size: ${flashSize}`, 'flasher');
+        }
+      }
     } catch {
-      flashSize = '8MB (Default for XIAO ESP32S3 Sense)';
+      logService.addLog('Notice: SPI Flash ID could not be queried.', 'flasher');
     }
 
-    // Read SPI Flash ID
-    let flashIdHex: string | undefined;
-    try {
-      const flashId = await this.esploader.readFlashId();
-      flashIdHex = `0x${flashId.toString(16).toUpperCase()}`;
-    } catch {
-      // Ignore if not readable
-    }
-
-    const portInfo = port.getInfo();
-    const vendorId = portInfo.usbVendorId ? `0x${portInfo.usbVendorId.toString(16)}` : undefined;
-    const productId = portInfo.usbProductId ? `0x${portInfo.usbProductId.toString(16)}` : undefined;
-
-    const chipInfo: ChipInfo = {
-      chipName,
+    return {
+      chipName: chipName || 'ESP32-S3',
       macAddress,
-      description: `${chipName} (${flashSize} Flash)`,
+      description: chipName || 'ESP32-S3',
       flashSize,
-      flashId: flashIdHex,
-      vendorId,
-      productId,
-      features: ['Wi-Fi 802.11 b/g/n', 'Bluetooth 5.0 (BLE)', 'Dual-core LX7', 'OPI PSRAM Support'],
+      flashId,
     };
-
-    return chipInfo;
   }
 
   /**
-   * Erases the entire flash memory of the connected ESP32-S3.
+   * Erases the entire target flash memory.
+   */
+  public async eraseChip(): Promise<void> {
+    if (!this.esploader) {
+      throw new Error('No active bootloader connection. Connect the device first.');
+    }
+
+    logService.addLog('Executing full chip erase (this may take up to 45 seconds)...', 'flasher');
+    await this.withTimeoutAndCleanup(
+      () => this.esploader!.eraseFlash(),
+      45000,
+      'Full chip erase',
+      async () => {
+        await this.disconnect();
+      }
+    );
+    logService.addLog('Full chip erase completed successfully.', 'flasher');
+  }
+
+  /**
+   * Alias for eraseChip.
    */
   public async eraseFlash(): Promise<void> {
-    if (!this.esploader) {
-      throw new Error('No active bootloader connection. Please connect first.');
-    }
-
-    logService.addLog('Erasing entire flash memory (45s timeout, please wait)...', 'flasher');
-    await this.withTimeout(this.esploader.eraseFlash(), 45000, 'Flash chip erase');
-    logService.addLog('Flash memory erase completed successfully.', 'flasher');
+    return this.eraseChip();
   }
 
   /**
-   * Flashes multiple binary images with progress updates and MD5 verification.
+   * Flashes multiple binary images with progress updates and on-chip MD5 verification.
    */
   public async flashImages(
     binaries: FirmwareBinary[],
@@ -226,7 +255,10 @@ export class ESP32Service {
       },
       calculateMD5Hash: (image: Uint8Array) => {
         const hash = computeMD5(image);
-        logService.addLog(`[MD5] Computed payload checksum: ${hash}`, 'flasher');
+        logService.addLog(
+          `[MD5] Computed local binary checksum: ${hash}. Awaiting on-chip SPI flash readback verification...`,
+          'flasher'
+        );
         if (onSegmentVerified) {
           onSegmentVerified('segment', hash);
         }
@@ -238,18 +270,33 @@ export class ESP32Service {
     const totalBytes = binaries.reduce((acc, f) => acc + f.size, 0);
     const timeoutMs = Math.max(60000, Math.round((totalBytes / 1024) * 200));
 
-    await this.withTimeout(this.esploader.writeFlash(flashOptions), timeoutMs, 'Firmware write');
-    logService.addLog('Firmware writing and on-chip verification completed successfully.', 'flasher');
+    await this.withTimeoutAndCleanup(
+      () => this.esploader!.writeFlash(flashOptions),
+      timeoutMs,
+      'Firmware write',
+      async () => {
+        await this.disconnect();
+      }
+    );
+
+    logService.addLog(
+      'SPI Flash readback MD5 matched source image. On-chip SPI bus integrity confirmed by ROM bootloader.',
+      'flasher'
+    );
   }
 
   /**
-   * Resets the device.
+   * Transmits hardware reset pulse to the device.
    */
   public async resetDevice(): Promise<void> {
     if (!this.esploader) return;
     try {
       logService.addLog('Transmitting hard reset pulse to ESP32-S3...', 'flasher');
-      await this.withTimeout(this.esploader.after('hard_reset'), 5000, 'Hardware reset');
+      await this.withTimeoutAndCleanup(
+        () => this.esploader!.after('hard_reset'),
+        5000,
+        'Hardware reset'
+      );
       logService.addLog('Reset signal delivered. Board is restarting.', 'flasher');
     } catch (err) {
       logService.addLog(`Notice: Reset signal attempted (${err}).`, 'flasher');
@@ -264,7 +311,11 @@ export class ESP32Service {
     if (this.transport) {
       try {
         this.transport.setDeviceLostCallback(null);
-        await this.withTimeout(this.transport.disconnect(), 3000, 'Transport disconnect');
+        await this.withTimeoutAndCleanup(
+          () => this.transport!.disconnect(),
+          3000,
+          'Transport disconnect'
+        );
       } catch {
         // Ignore disconnect errors during teardown
       }

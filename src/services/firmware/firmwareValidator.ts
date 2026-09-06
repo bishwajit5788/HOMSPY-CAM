@@ -1,4 +1,9 @@
-import type { FirmwarePackage, FirmwareManifest, ManifestFileEntry } from '../../types/firmware';
+import type {
+  FirmwarePackage,
+  FirmwareManifest,
+  ManifestFileEntry,
+  FlashCapacityStatus,
+} from '../../types/firmware';
 import { parseHexAddress } from '../../utils/formatters';
 
 export interface ValidationError {
@@ -11,22 +16,24 @@ export interface ValidationResult {
   isValid: boolean;
   errors: ValidationError[];
   warnings: ValidationError[];
+  flashCapacityStatus: FlashCapacityStatus;
 }
 
-// Standard chip identifiers in ESP-IDF image header (offset 12-13 little-endian)
+// Standard chip identifiers in ESP-IDF image header (offset 12 in image extended header)
 export const ESP_CHIP_IDS: Record<number, string> = {
-  0x0000: 'ESP32',
-  0x0002: 'ESP32-S2',
-  0x0005: 'ESP32-C3',
-  0x0009: 'ESP32-S3',
-  0x000c: 'ESP32-C2',
-  0x000d: 'ESP32-C6',
-  0x0010: 'ESP32-H2',
+  0x00: 'ESP32',
+  0x02: 'ESP32-S2',
+  0x05: 'ESP32-C3',
+  0x09: 'ESP32-S3',
+  0x0c: 'ESP32-C2',
+  0x0d: 'ESP32-C6',
+  0x10: 'ESP32-H2',
+  0x12: 'ESP32-P4',
 };
 
 export class FirmwareValidator {
   /**
-   * Validates manifest JSON structure and integrity rules.
+   * Validates manifest JSON structure, paths, offsets, and field types.
    */
   public static validateManifestSchema(manifest: unknown): ValidationResult {
     const errors: ValidationError[] = [];
@@ -38,7 +45,7 @@ export class FirmwareValidator {
         message: 'Manifest must be a valid JSON object.',
         severity: 'error',
       });
-      return { isValid: false, errors, warnings };
+      return { isValid: false, errors, warnings, flashCapacityStatus: 'unknown' };
     }
 
     const m = manifest as Partial<FirmwareManifest>;
@@ -73,14 +80,19 @@ export class FirmwareValidator {
         message: 'Manifest must declare a non-empty "files" array.',
         severity: 'error',
       });
-      return { isValid: errors.length === 0, errors, warnings };
+      return { isValid: errors.length === 0, errors, warnings, flashCapacityStatus: 'unknown' };
     }
 
     for (const [idx, fileEntry] of m.files.entries()) {
       this.validateManifestEntry(fileEntry, idx, errors, warnings);
     }
 
-    return { isValid: errors.length === 0, errors, warnings };
+    return {
+      isValid: errors.length === 0,
+      errors,
+      warnings,
+      flashCapacityStatus: 'unknown',
+    };
   }
 
   /**
@@ -144,6 +156,18 @@ export class FirmwareValidator {
       }
     }
 
+    // Size / expectedSize normalization & validation
+    const declaredSize = f.size ?? f.expectedSize;
+    if (declaredSize !== undefined) {
+      if (typeof declaredSize !== 'number' || declaredSize <= 0 || !Number.isInteger(declaredSize)) {
+        errors.push({
+          field: `files[${index}].size`,
+          message: `Declared size "${declaredSize}" for "${f.path}" must be a positive integer byte count.`,
+          severity: 'error',
+        });
+      }
+    }
+
     // SHA-256 validation format check if specified
     if (f.sha256) {
       if (!/^[a-fA-F0-9]{64}$/.test(f.sha256)) {
@@ -167,7 +191,7 @@ export class FirmwareValidator {
    */
   public static validatePackage(
     pkg: FirmwarePackage,
-    detectedCapacityBytes?: number,
+    detectedCapacityBytes?: number | null,
     expectedChip = 'ESP32-S3'
   ): ValidationResult {
     const errors: ValidationError[] = [];
@@ -179,7 +203,7 @@ export class FirmwareValidator {
         message: 'Firmware package contains no binary files.',
         severity: 'error',
       });
-      return { isValid: false, errors, warnings };
+      return { isValid: false, errors, warnings, flashCapacityStatus: 'unknown' };
     }
 
     // 1. Chip compatibility check
@@ -191,7 +215,7 @@ export class FirmwareValidator {
       });
     }
 
-    // 2. Individual file validation & ESP header inspection
+    // 2. Individual file validation & ESP image header inspection
     for (const [idx, bin] of pkg.files.entries()) {
       if (!bin.data || bin.data.byteLength === 0) {
         errors.push({
@@ -220,25 +244,42 @@ export class FirmwareValidator {
 
       // Check ESP image header for executable images (bootloader at 0x0 or app at 0x10000)
       if (bin.offsetNum === 0x0 || bin.offsetNum >= 0x10000) {
-        if (bin.data.byteLength >= 24) {
+        if (bin.data.byteLength < 24) {
+          errors.push({
+            field: `files[${idx}].header`,
+            message: `Executable image "${bin.fileName}" at ${bin.offsetHex} is too small (${bin.data.byteLength} bytes). Minimum 24 bytes required for ESP32 image header.`,
+            severity: 'error',
+          });
+        } else {
+          // Magic byte check (must be 0xE9)
           const magic = bin.data[0];
           if (magic !== 0xe9) {
-            warnings.push({
+            errors.push({
               field: `files[${idx}].header`,
-              message: `File "${bin.fileName}" at offset ${bin.offsetHex} does not start with standard ESP32 image magic byte (0xE9). First byte is 0x${magic.toString(16).toUpperCase()}.`,
-              severity: 'warning',
+              message: `File "${bin.fileName}" at offset ${bin.offsetHex} is missing mandatory ESP32 image magic byte (0xE9). First byte is 0x${magic.toString(16).toUpperCase().padStart(2, '0')}. Flashing this image will cause immediate ROM boot failure.`,
+              severity: 'error',
             });
-          } else {
-            // Check chip_id in header byte 12-13 (little endian)
-            const chipId = bin.data[12] | (bin.data[13] << 8);
-            if (chipId !== 0x0009 && chipId !== 0x0000) {
-              const detectedName = ESP_CHIP_IDS[chipId] || `Unknown (0x${chipId.toString(16)})`;
-              warnings.push({
-                field: `files[${idx}].chip_id`,
-                message: `File "${bin.fileName}" header indicates chip ID ${detectedName}, but expected ESP32-S3 (0x0009).`,
-                severity: 'warning',
-              });
-            }
+          }
+
+          // Chip ID check in header byte 12 (ESP-IDF format)
+          const chipId = bin.data[12];
+          if (expectedChip.toUpperCase().includes('ESP32-S3') && chipId !== 0x09) {
+            const detectedName = ESP_CHIP_IDS[chipId] || `Unknown (0x${chipId.toString(16)})`;
+            errors.push({
+              field: `files[${idx}].chip_id`,
+              message: `Chip architecture mismatch: File "${bin.fileName}" header indicates chip ID 0x${chipId.toString(16).padStart(2, '0')} (${detectedName}), but target is ESP32-S3 (0x09). Flashing wrong architecture will cause immediate CPU boot failure.`,
+              severity: 'error',
+            });
+          }
+
+          // Extended header append_digest check (byte 23 must be 0 or 1)
+          const appendDigest = bin.data[23];
+          if (appendDigest !== 0 && appendDigest !== 1) {
+            errors.push({
+              field: `files[${idx}].header`,
+              message: `Invalid append_digest header field in "${bin.fileName}" (0x${appendDigest.toString(16)}). Must be 0 or 1 per ESP-IDF image specification.`,
+              severity: 'error',
+            });
           }
         }
       }
@@ -261,11 +302,21 @@ export class FirmwareValidator {
       }
     }
 
-    // 4. Flash capacity boundary check
-    if (detectedCapacityBytes && detectedCapacityBytes > 0) {
+    // 4. Flash capacity boundary check (No unsafe 8MB fallback)
+    let flashCapacityStatus: FlashCapacityStatus = 'verified';
+    if (!detectedCapacityBytes || detectedCapacityBytes <= 0) {
+      flashCapacityStatus = 'unknown';
+      warnings.push({
+        field: 'flash_capacity',
+        message:
+          'Target flash capacity is UNKNOWN. Flash memory boundary safety cannot be verified automatically. Verify flash size before flashing custom payloads.',
+        severity: 'warning',
+      });
+    } else {
       for (const bin of pkg.files) {
         const fileEnd = bin.offsetNum + bin.size;
         if (fileEnd > detectedCapacityBytes) {
+          flashCapacityStatus = 'exceeded';
           errors.push({
             field: 'flash_capacity',
             message: `File "${bin.fileName}" extends to 0x${fileEnd.toString(16)} (${fileEnd} bytes), which exceeds detected flash capacity of 0x${detectedCapacityBytes.toString(16)} (${detectedCapacityBytes} bytes).`,
@@ -279,14 +330,17 @@ export class FirmwareValidator {
       isValid: errors.length === 0,
       errors,
       warnings,
+      flashCapacityStatus,
     };
   }
 
   /**
-   * Parses human-readable flash size strings ("8MB", "4MB", "16MB") into byte counts.
+   * Parses human-readable flash size strings ("8MB", "4MB", "16MB") into exact byte counts.
+   * Returns null if string is undefined, empty, or unparseable.
+   * (NO SILENT 8MB FALLBACK)
    */
-  public static parseFlashCapacityBytes(flashSizeStr?: string): number {
-    if (!flashSizeStr) return 8 * 1024 * 1024; // Default 8MB for XIAO ESP32S3
+  public static parseFlashCapacityBytes(flashSizeStr?: string): number | null {
+    if (!flashSizeStr) return null;
     const clean = flashSizeStr.toUpperCase().trim();
     if (clean.includes('32MB')) return 32 * 1024 * 1024;
     if (clean.includes('16MB')) return 16 * 1024 * 1024;
@@ -294,6 +348,8 @@ export class FirmwareValidator {
     if (clean.includes('4MB')) return 4 * 1024 * 1024;
     if (clean.includes('2MB')) return 2 * 1024 * 1024;
     if (clean.includes('1MB')) return 1 * 1024 * 1024;
-    return 8 * 1024 * 1024;
+    if (clean.includes('512KB')) return 512 * 1024;
+    if (clean.includes('256KB')) return 256 * 1024;
+    return null;
   }
 }

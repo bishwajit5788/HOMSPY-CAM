@@ -15,7 +15,16 @@ export interface ChipInfo {
 }
 
 export interface FlashProgress {
-  stage: 'idle' | 'preparing' | 'erasing' | 'writing' | 'verifying' | 'resetting' | 'complete' | 'failed';
+  stage:
+    | 'idle'
+    | 'preparing'
+    | 'validating'
+    | 'erasing'
+    | 'writing'
+    | 'verifying'
+    | 'resetting'
+    | 'complete'
+    | 'failed';
   stageText: string;
   fileIndex: number;
   totalFiles: number;

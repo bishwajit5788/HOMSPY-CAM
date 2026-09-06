@@ -279,8 +279,31 @@ export const FirmwarePanel: React.FC<FirmwarePanelProps> = ({
           <div className="firmware-summary-card">
             <div className="summary-header">
               <span className="summary-title">Firmware Payload Summary</span>
-              <span className="summary-badge">{packageData.source.toUpperCase()}</span>
+              <div className="flex items-center gap-2">
+                <span className="summary-badge">{packageData.source.toUpperCase()}</span>
+                {packageData.trustLevel === 'official_verified' ? (
+                  <span className="badge badge-emerald text-xs flex items-center gap-1">
+                    <FileCheck className="w-3 h-3" /> Official Verified
+                  </span>
+                ) : (
+                  <span
+                    className="badge badge-amber text-xs flex items-center gap-1"
+                    title={packageData.trustReason}
+                  >
+                    <AlertTriangle className="w-3 h-3" /> Unverified Custom
+                  </span>
+                )}
+              </div>
             </div>
+
+            {packageData.flashCapacityStatus === 'unknown' && (
+              <div className="p-2.5 my-2 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Target flash capacity is UNKNOWN.</strong> Automatic boundary verification cannot be performed without a connected device. Verify hardware flash size before flashing custom payloads.
+                </div>
+              </div>
+            )}
 
             <div className="summary-grid">
               <div className="summary-item">
@@ -311,7 +334,9 @@ export const FirmwarePanel: React.FC<FirmwarePanelProps> = ({
                     <th>File</th>
                     <th>Offset</th>
                     <th>Size</th>
-                    <th>MD5 Hash</th>
+                    <th title="Source image MD5. Checked against on-chip SPI flash readback during write.">
+                      Local MD5 Checksum
+                    </th>
                   </tr>
                 </thead>
                 <tbody>

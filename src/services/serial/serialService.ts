@@ -1,7 +1,8 @@
 import type { BaudRate, LineEnding } from '../../types/serial';
 import { logService } from '../logger/logService';
+import { portCoordinator, type PortOwner } from '../port/portCoordinator';
 
-export type PortOwner = 'none' | 'flasher' | 'monitor';
+export type { PortOwner };
 
 export class SerialService {
   private currentPort: SerialPort | null = null;
@@ -10,8 +11,6 @@ export class SerialService {
   private isReading = false;
   private lineBuffer = '';
   private disconnectHandler: (() => void) | null = null;
-  private currentOwner: PortOwner = 'none';
-  private hasRegisteredDisconnectListener = false;
 
   public get port(): SerialPort | null {
     return this.currentPort;
@@ -22,27 +21,16 @@ export class SerialService {
   }
 
   public get owner(): PortOwner {
-    return this.currentOwner;
+    return portCoordinator.owner;
   }
 
   constructor() {
-    this.registerGlobalDisconnectListener();
-  }
-
-  /**
-   * Registers global Web Serial disconnect event listener.
-   */
-  private registerGlobalDisconnectListener(): void {
-    if (typeof navigator !== 'undefined' && 'serial' in navigator && !this.hasRegisteredDisconnectListener) {
-      navigator.serial.addEventListener('disconnect', (event: Event) => {
-        const customEvent = event as Event & { port?: SerialPort };
-        if (customEvent.port && customEvent.port === this.currentPort) {
-          logService.addLog('CRITICAL: Web Serial hardware port disconnected.', 'error');
-          this.handleHardwareDisconnect();
-        }
-      });
-      this.hasRegisteredDisconnectListener = true;
-    }
+    portCoordinator.onDisconnect((disconnectedPort) => {
+      if (this.currentPort && this.currentPort === disconnectedPort) {
+        logService.addLog('CRITICAL: Web Serial hardware port disconnected.', 'error');
+        this.handleHardwareDisconnect();
+      }
+    });
   }
 
   /**
@@ -98,27 +86,6 @@ export class SerialService {
   }
 
   /**
-   * Acquires ownership lock on the serial port.
-   */
-  public acquireOwnership(owner: PortOwner): void {
-    if (this.currentOwner !== 'none' && this.currentOwner !== owner) {
-      throw new Error(
-        `Port conflict: Serial port is currently owned by "${this.currentOwner}". Release it before acquiring for "${owner}".`
-      );
-    }
-    this.currentOwner = owner;
-  }
-
-  /**
-   * Releases ownership lock on the serial port.
-   */
-  public releaseOwnership(owner: PortOwner): void {
-    if (this.currentOwner === owner) {
-      this.currentOwner = 'none';
-    }
-  }
-
-  /**
    * Opens the serial port for serial monitoring at the chosen baud rate.
    */
   public async openForMonitor(
@@ -131,7 +98,8 @@ export class SerialService {
       await this.close();
     }
 
-    this.acquireOwnership('monitor');
+    // Acquire exclusive lease through PortCoordinator
+    await portCoordinator.acquireLease('monitor', port);
     this.currentPort = port;
     this.disconnectHandler = onDisconnect || null;
 
@@ -156,7 +124,7 @@ export class SerialService {
       this.startReadLoop(port);
     } catch (err: unknown) {
       const error = err as Error;
-      this.releaseOwnership('monitor');
+      await portCoordinator.releaseLease('monitor');
       this.currentPort = null;
       throw new Error(`Failed to open serial port for monitoring: ${error.message || error}`);
     }
@@ -286,7 +254,7 @@ export class SerialService {
       this.currentPort = null;
     }
 
-    this.releaseOwnership('monitor');
+    await portCoordinator.releaseLease('monitor');
     logService.addLog('Serial monitor closed cleanly.', 'system');
   }
 
