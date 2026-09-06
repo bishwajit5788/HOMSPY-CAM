@@ -12,100 +12,56 @@ import type { FirmwareBinary } from '../../types/firmware';
 import { logService } from '../logger/logService';
 import { computeMD5 } from '../../utils/crypto';
 
-export interface FlashProgressCallback {
-  (fileIndex: number, writtenBytes: number, totalBytes: number, currentFileName: string): void;
-}
+export interface FlashProgressCallback { (fileIndex: number, writtenBytes: number, totalBytes: number, currentFileName: string): void; }
 
 export class ESP32Service {
   private transport: Transport | null = null;
   private esploader: ESPLoader | null = null;
   private isConnected = false;
+  private detectedChipName = '';
   private deviceLostCallback: (() => void) | null = null;
 
-  public get connected(): boolean {
-    return this.isConnected;
-  }
+  public get connected(): boolean { return this.isConnected; }
 
-  /**
-   * Applies a hard timeout. esptool-js 0.6.1 does not expose AbortSignal-aware
-   * operations, so cancellation is implemented as deterministic transport teardown
-   * rather than pretending the underlying promise itself is cooperatively aborted.
-   */
-  private async withTimeoutAndCleanup<T>(
-    operationFn: (signal: AbortSignal) => Promise<T>,
-    timeoutMs: number,
-    operationName: string,
-    onTimeoutCleanup?: () => Promise<void> | void
-  ): Promise<T> {
+  private async withTimeoutAndCleanup<T>(operationFn: (signal: AbortSignal) => Promise<T>, timeoutMs: number, operationName: string, onTimeoutCleanup?: () => Promise<void> | void): Promise<T> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-
     const operation = operationFn(controller.signal);
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(async () => {
-        timedOut = true;
         controller.abort();
-        logService.addLog(
-          `TIMEOUT: Operation "${operationName}" exceeded ${Math.round(timeoutMs / 1000)}s. Transport cancellation is being enforced.`,
-          'error'
-        );
-        try {
-          await onTimeoutCleanup?.();
-        } catch (cleanupErr) {
-          console.warn('Timeout cleanup failed:', cleanupErr);
-        }
+        logService.addLog(`TIMEOUT: Operation "${operationName}" exceeded ${Math.round(timeoutMs / 1000)}s. Enforcing transport cancellation.`, 'error');
+        try { await onTimeoutCleanup?.(); } catch (cleanupErr) { console.warn('Timeout cleanup failed:', cleanupErr); }
         reject(new Error(`Operation "${operationName}" timed out after ${Math.round(timeoutMs / 1000)}s.`));
       }, timeoutMs);
     });
-
-    try {
-      const result = await Promise.race([operation, timeout]);
-      if (timedOut) throw new Error(`Operation "${operationName}" was cancelled after timeout.`);
-      return result;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    try { return await Promise.race([operation, timeout]); }
+    finally { if (timer) clearTimeout(timer); }
   }
 
   public async connectAndDetect(port: SerialPort, baudRate = 115200, onDeviceLost?: () => void): Promise<ChipInfo> {
     if (this.transport) await this.disconnect();
     this.deviceLostCallback = onDeviceLost || null;
-    logService.addLog('Initializing ESP32 Web Serial transport...', 'flasher');
-
     const terminal: IEspLoaderTerminal = {
       clean: () => {},
       writeLine: (data: string) => { if (data.trim()) logService.addLog(data.trim(), 'flasher'); },
       write: (data: string) => { if (data.trim()) logService.addLog(data.trim(), 'flasher'); },
     };
-
     this.transport = new Transport(port, false);
     this.transport.setDeviceLostCallback(() => {
       logService.addLog('CRITICAL: USB device disconnect detected by flasher transport!', 'error');
       this.isConnected = false;
       this.deviceLostCallback?.();
     });
-
     this.esploader = new ESPLoader({ transport: this.transport, baudrate: baudRate, terminal });
-    logService.addLog('Synchronizing with ESP32-S3 ROM bootloader (15s timeout)...', 'flasher');
 
     let chipName = '';
     try {
-      chipName = await this.withTimeoutAndCleanup(
-        () => this.esploader!.main('default_reset'),
-        15000,
-        'ROM bootloader synchronization (default reset)',
-        async () => { await this.disconnect(); }
-      );
+      chipName = await this.withTimeoutAndCleanup(() => this.esploader!.main('default_reset'), 15000, 'ROM bootloader synchronization (default reset)', async () => { await this.disconnect(); });
     } catch (firstErr) {
       logService.addLog(`Default reset sync notice: ${firstErr}. Attempting direct connection ('no_reset')...`, 'flasher');
       try {
-        chipName = await this.withTimeoutAndCleanup(
-          () => this.esploader!.main('no_reset'),
-          15000,
-          'ROM bootloader synchronization (no_reset)',
-          async () => { await this.disconnect(); }
-        );
+        chipName = await this.withTimeoutAndCleanup(() => this.esploader!.main('no_reset'), 15000, 'ROM bootloader synchronization (no_reset)', async () => { await this.disconnect(); });
       } catch (secondErr) {
         await this.disconnect();
         throw new Error(`Failed to synchronize with ESP32-S3 ROM bootloader. ${secondErr}. Ensure board is in bootloader mode.`);
@@ -113,7 +69,8 @@ export class ESP32Service {
     }
 
     this.isConnected = true;
-    logService.addLog(`ROM bootloader synchronized successfully. Detected chip: ${chipName}`, 'flasher');
+    this.detectedChipName = chipName || 'ESP32-S3';
+    logService.addLog(`ROM bootloader synchronized successfully. Detected chip: ${this.detectedChipName}`, 'flasher');
 
     let macAddress = 'Unknown';
     try {
@@ -121,9 +78,7 @@ export class ESP32Service {
         const mac = await this.esploader.chip.readMac(this.esploader);
         if (mac) macAddress = mac;
       }
-    } catch {
-      logService.addLog('Notice: MAC address could not be read.', 'flasher');
-    }
+    } catch { logService.addLog('Notice: MAC address could not be read.', 'flasher'); }
 
     let flashId: string | undefined;
     let flashSize: string | undefined;
@@ -134,47 +89,28 @@ export class ESP32Service {
         const lowByte = (rawFlashId >> 16) & 0xff;
         const detected = this.esploader.DETECTED_FLASH_SIZES[lowByte];
         if (detected) {
-          // Prefix the value so downstream validation can distinguish real hardware
-          // detection from a user-selected flash-size configuration value.
           flashSize = `detected:${detected}`;
           logService.addLog(`Detected SPI Flash Size: ${detected}`, 'flasher');
         }
       }
-    } catch {
-      logService.addLog('Notice: SPI Flash ID could not be queried. Flash capacity remains UNKNOWN.', 'flasher');
-    }
+    } catch { logService.addLog('Notice: SPI Flash ID could not be queried. Flash capacity remains UNKNOWN.', 'flasher'); }
 
-    return { chipName: chipName || 'ESP32-S3', macAddress, description: chipName || 'ESP32-S3', flashSize, flashId };
+    return { chipName: this.detectedChipName, macAddress, description: this.detectedChipName, flashSize, flashId };
   }
 
   public async eraseChip(): Promise<void> {
     if (!this.esploader) throw new Error('No active bootloader connection. Connect the device first.');
-    logService.addLog('Executing full chip erase (this may take up to 45 seconds)...', 'flasher');
-    await this.withTimeoutAndCleanup(
-      () => this.esploader!.eraseFlash(),
-      45000,
-      'Full chip erase',
-      async () => { await this.disconnect(); }
-    );
+    await this.withTimeoutAndCleanup(() => this.esploader!.eraseFlash(), 45000, 'Full chip erase', async () => { await this.disconnect(); });
     logService.addLog('Full chip erase completed successfully.', 'flasher');
   }
-
   public async eraseFlash(): Promise<void> { return this.eraseChip(); }
 
-  public async flashImages(
-    binaries: FirmwareBinary[],
-    config: FlashConfig,
-    onProgress: FlashProgressCallback,
-    onSegmentVerified?: (fileName: string, hash: string) => void
-  ): Promise<void> {
+  public async flashImages(binaries: FirmwareBinary[], config: FlashConfig, onProgress: FlashProgressCallback, onSegmentVerified?: (fileName: string, hash: string) => void): Promise<void> {
     if (!this.esploader) throw new Error('No active bootloader connection.');
-
     const fileArray = binaries.map((bin) => ({ data: bin.data, address: bin.offsetNum }));
-    const isEsp32S3 = this.esploader.chip?.constructor?.name?.toUpperCase().includes('ESP32S3') || true;
+    const isEsp32S3 = this.detectedChipName.toUpperCase().includes('ESP32-S3');
     const effectiveCompression = isEsp32S3 ? false : config.compress;
-    if (isEsp32S3 && config.compress) {
-      logService.addLog('ESP32-S3 safety policy: disabling compressed write path for esptool-js 0.6.1 due known S3 compressed-write reliability issues.', 'system');
-    }
+    if (isEsp32S3 && config.compress) logService.addLog('ESP32-S3 safety policy: disabling compressed write path for esptool-js 0.6.1 due known S3 compressed-write reliability issues.', 'system');
 
     const flashOptions: FlashOptions = {
       fileArray,
@@ -183,31 +119,16 @@ export class ESP32Service {
       flashSize: config.flashSize as FlashSizeValues,
       eraseAll: config.eraseAll,
       compress: effectiveCompression,
-      reportProgress: (fileIndex: number, written: number, total: number) => {
-        onProgress(fileIndex, written, total, binaries[fileIndex]?.fileName || `Segment ${fileIndex + 1}`);
-      },
-      calculateMD5Hash: (image: Uint8Array) => {
-        // This is the expected source checksum. Do not report it as verified here;
-        // esptool-js performs the on-device SPI_FLASH_MD5 comparison during writeFlash.
-        return computeMD5(image);
-      },
+      reportProgress: (fileIndex: number, written: number, total: number) => onProgress(fileIndex, written, total, binaries[fileIndex]?.fileName || `Segment ${fileIndex + 1}`),
+      calculateMD5Hash: (image: Uint8Array) => computeMD5(image),
     };
 
     const totalBytes = binaries.reduce((acc, f) => acc + f.size, 0);
     const timeoutMs = Math.max(60000, Math.round((totalBytes / 1024) * 200));
+    await this.withTimeoutAndCleanup(() => this.esploader!.writeFlash(flashOptions), timeoutMs, 'Firmware write', async () => { await this.disconnect(); });
 
-    await this.withTimeoutAndCleanup(
-      () => this.esploader!.writeFlash(flashOptions),
-      timeoutMs,
-      'Firmware write',
-      async () => { await this.disconnect(); }
-    );
-
-    // writeFlash resolves only after esptool-js has completed its post-write MD5
-    // verification. Only now may the application label segments as verified.
-    for (const bin of binaries) {
-      onSegmentVerified?.(bin.fileName, bin.md5);
-    }
+    // writeFlash resolves only after esptool-js completes its SPI_FLASH_MD5 post-write verification.
+    for (const bin of binaries) onSegmentVerified?.(bin.fileName, bin.md5);
     logService.addLog('Firmware write completed and esptool-js post-write SPI flash MD5 verification succeeded.', 'flasher');
   }
 
@@ -216,20 +137,17 @@ export class ESP32Service {
     try {
       await this.withTimeoutAndCleanup(() => this.esploader!.after('hard_reset'), 5000, 'Hardware reset');
       logService.addLog('Reset signal delivered. Board is restarting.', 'flasher');
-    } catch (err) {
-      logService.addLog(`Notice: Reset signal attempted (${err}).`, 'flasher');
-    }
+    } catch (err) { logService.addLog(`Notice: Reset signal attempted (${err}).`, 'flasher'); }
   }
 
   public async disconnect(): Promise<void> {
     this.isConnected = false;
+    this.detectedChipName = '';
     if (this.transport) {
       try {
         this.transport.setDeviceLostCallback(null);
         await this.withTimeoutAndCleanup(() => this.transport!.disconnect(), 3000, 'Transport disconnect');
-      } catch {
-        // Teardown is best-effort; the browser owns the underlying USB resource.
-      }
+      } catch { /* best-effort teardown */ }
       this.transport = null;
     }
     this.esploader = null;
