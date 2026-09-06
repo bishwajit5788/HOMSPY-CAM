@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { verifyManifestSignature, canonicalizeManifest } from '../src/services/firmware/firmwareTrust';
 import { firmwareRollbackService } from '../src/services/firmware/firmwareRollbackService';
 import { flashRecoveryService } from '../src/services/recovery/flashRecoveryService';
@@ -15,45 +15,14 @@ const signedManifest: FirmwareManifest = {
   signature: { algorithm: 'ECDSA-P256-SHA256', keyId: 'homspy-release-2026-p256', signature: 'HMM7G/fRIX/NXlUFoUXP25vwRvsKgrb3VMvWkNzjUA1jySDp2JxneRqXDymVAGbiwCsbPlbKLLlzeG4x7hRynw==' },
 };
 
-const pkg = (version: string, name = 'Test Release'): FirmwarePackage => ({
-  name, version, chip: 'ESP32-S3', board: 'Seeed Studio XIAO ESP32S3 Sense', flashMode: 'dio', flashFreq: '80m', flashSize: '8MB', files: [], totalSize: 0, source: 'builtin', trustLevel: 'signed_verified', trustReason: 'test',
-});
-
-class MemoryStorage {
-  private values = new Map<string, string>();
-  getItem(key: string) { return this.values.get(key) ?? null; }
-  setItem(key: string, value: string) { this.values.set(key, value); }
-  removeItem(key: string) { this.values.delete(key); }
-}
+const pkg = (version: string, name = 'Test Release'): FirmwarePackage => ({ name, version, chip: 'ESP32-S3', board: 'Seeed Studio XIAO ESP32S3 Sense', flashMode: 'dio', flashFreq: '80m', flashSize: '8MB', files: [], totalSize: 0, source: 'builtin', trustLevel: 'signed_verified', trustReason: 'test' });
+class MemoryStorage { private values = new Map<string, string>(); getItem(key: string) { return this.values.get(key) ?? null; } setItem(key: string, value: string) { this.values.set(key, value); } removeItem(key: string) { this.values.delete(key); } }
 
 describe('release trust and recovery hardening', () => {
   beforeEach(() => { vi.stubGlobal('localStorage', new MemoryStorage()); });
   afterEach(() => { vi.unstubAllGlobals(); });
-
-  it('verifies the pinned built-in manifest signature', async () => {
-    expect(canonicalizeManifest(signedManifest)).toContain('XIAO ESP32S3 Camera');
-    await expect(verifyManifestSignature(signedManifest)).resolves.toBe(true);
-  });
-
-  it('rejects a signed manifest after any signed field changes', async () => {
-    const tampered = { ...signedManifest, version: '1.0.1' };
-    await expect(verifyManifestSignature(tampered)).resolves.toBe(false);
-  });
-
-  it('blocks a lower trusted release after a newer trusted release succeeds', () => {
-    firmwareRollbackService.recordSuccessfulFlash(pkg('1.2.0'));
-    expect(firmwareRollbackService.check(pkg('1.1.9')).allowed).toBe(false);
-    expect(firmwareRollbackService.check(pkg('1.2.0')).allowed).toBe(false);
-    expect(firmwareRollbackService.check(pkg('1.3.0')).allowed).toBe(true);
-  });
-
-  it('retains interrupted flash state and matches the same package fingerprint', () => {
-    const release = pkg('1.2.0', 'Recovery Test');
-    flashRecoveryService.begin(release, 'writing', { flashMode: 'dio', flashFreq: '80m', flashSize: '8MB', eraseAll: false, compress: false });
-    flashRecoveryService.markInterrupted();
-    expect(flashRecoveryService.get()?.interrupted).toBe(true);
-    expect(flashRecoveryService.matches(release)).toBe(true);
-    flashRecoveryService.clear();
-    expect(flashRecoveryService.get()).toBeNull();
-  });
+  it('verifies the pinned built-in manifest signature', async () => { expect(canonicalizeManifest(signedManifest)).toContain('XIAO ESP32S3 Camera'); await expect(verifyManifestSignature(signedManifest)).resolves.toBe(true); });
+  it('rejects a signed manifest after any signed field changes', async () => { const tampered = { ...signedManifest, version: '1.0.1' }; await expect(verifyManifestSignature(tampered)).resolves.toBe(false); });
+  it('blocks a lower trusted release after a newer trusted release succeeds', () => { firmwareRollbackService.recordSuccessfulFlash(pkg('1.2.0')); expect(firmwareRollbackService.check(pkg('1.1.9')).allowed).toBe(false); expect(firmwareRollbackService.check(pkg('1.2.0')).allowed).toBe(false); expect(firmwareRollbackService.check(pkg('1.3.0')).allowed).toBe(true); });
+  it('retains interrupted flash state and matches the same package fingerprint', () => { const release = pkg('1.2.0', 'Recovery Test'); flashRecoveryService.begin(release, 'writing', { flashMode: 'dio', flashFreq: '80m', flashSize: '8MB', eraseAll: false, compress: false }); flashRecoveryService.markInterrupted(); expect(flashRecoveryService.get()?.interrupted).toBe(true); expect(flashRecoveryService.matches(release)).toBe(true); flashRecoveryService.clear(); expect(flashRecoveryService.get()).toBeNull(); });
 });
