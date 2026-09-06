@@ -14,6 +14,7 @@ export class FirmwareService {
 
     const binaries: FirmwareBinary[] = [];
     for (const fileEntry of manifest.files) {
+      if (!fileEntry.sha256) throw new Error(`Built-in firmware entry "${fileEntry.path}" is missing its pinned SHA-256 checksum.`);
       const response = await fetch(`${basePath}/${fileEntry.path}`);
       if (!response.ok) throw new Error(`Failed to load binary ${fileEntry.path} (${response.status})`);
       const uint8 = new Uint8Array(await response.arrayBuffer());
@@ -22,8 +23,8 @@ export class FirmwareService {
       const sha256 = await computeSHA256(uint8);
       const expectedSize = fileEntry.size ?? fileEntry.expectedSize;
       if (expectedSize !== undefined && uint8.byteLength !== expectedSize) throw new Error(`Payload size mismatch for "${fileEntry.path}".`);
-      if (fileEntry.sha256 && fileEntry.sha256.toLowerCase() !== sha256.toLowerCase()) throw new Error(`Firmware SHA-256 mismatch for "${fileEntry.path}".`);
-      binaries.push({ id: `builtin-${fileEntry.path}`, fileName: fileEntry.path, offsetHex: formatHexAddress(offsetNum), offsetNum, data: uint8, size: uint8.byteLength, sha256, md5, isValid: true, description: fileEntry.description });
+      if (fileEntry.sha256.toLowerCase() !== sha256.toLowerCase()) throw new Error(`Firmware SHA-256 mismatch for "${fileEntry.path}".`);
+      binaries.push({ id: `builtin-${fileEntry.path}`, fileName: fileEntry.path, offsetHex: formatHexAddress(offsetNum), offsetNum, data: uint8, size: uint8.byteLength, sha256, md5, isValid: uint8.byteLength > 0, description: fileEntry.description });
     }
 
     const pkg: FirmwarePackage = {
@@ -42,10 +43,9 @@ export class FirmwareService {
       trustReason: 'Official built-in firmware with pinned SHA-256 checksums.',
     };
 
-    // The built-in manifest is the source of truth for its declared package capacity;
-    // runtime flashing still re-validates against the actually detected device capacity.
-    const declaredCapacity = FirmwareValidator.parseFlashCapacityBytes(manifest.flash_size);
-    const result = FirmwareValidator.validatePackage(pkg, declaredCapacity, manifest.chip);
+    // Do not assume the manifest's declared flash size is the physical device capacity.
+    // The authoritative capacity check happens immediately before flashing.
+    const result = FirmwareValidator.validatePackage(pkg, null, manifest.chip);
     pkg.flashCapacityStatus = result.flashCapacityStatus;
     if (!result.isValid) throw new Error(result.errors.map((e) => e.message).join('\n'));
     return pkg;
@@ -63,6 +63,7 @@ export class FirmwareService {
     const fileMap = new Map(files.map((f) => [f.name.toLowerCase(), f]));
     const binaries: FirmwareBinary[] = [];
     for (const entry of manifest.files) {
+      if (!entry.sha256) throw new Error(`Manifest entry "${entry.path}" has no SHA-256 checksum. Every manifest binary must pin SHA-256.`);
       const baseName = entry.path.split('/').pop()?.toLowerCase() || '';
       const file = fileMap.get(baseName);
       if (!file) throw new Error(`Manifest specifies "${entry.path}", but no matching file was uploaded.`);
@@ -72,7 +73,7 @@ export class FirmwareService {
       const sha256 = await computeSHA256(uint8);
       const expectedSize = entry.size ?? entry.expectedSize;
       if (expectedSize !== undefined && uint8.byteLength !== expectedSize) throw new Error(`Payload size mismatch for "${file.name}".`);
-      if (entry.sha256 && entry.sha256.toLowerCase() !== sha256.toLowerCase()) throw new Error(`Firmware SHA-256 mismatch for "${file.name}".`);
+      if (entry.sha256.toLowerCase() !== sha256.toLowerCase()) throw new Error(`Firmware SHA-256 mismatch for "${file.name}".`);
       binaries.push({ id: `manifest-${file.name}-${Date.now()}`, fileName: file.name, offsetHex: formatHexAddress(offsetNum), offsetNum, data: uint8, size: uint8.byteLength, sha256, md5, isValid: uint8.byteLength > 0, description: entry.description });
     }
     const pkg: FirmwarePackage = {
@@ -81,7 +82,7 @@ export class FirmwareService {
       flashSize: manifest.flash_size || '8MB', files: binaries,
       totalSize: binaries.reduce((acc, f) => acc + f.size, 0), source: 'manifest',
       trustLevel: 'unverified_custom',
-      trustReason: 'Custom manifest package; authenticity is not established by this application.',
+      trustReason: 'Custom manifest package with per-file SHA-256 integrity pins; authenticity is not established by this application.',
     };
     const result = FirmwareValidator.validatePackage(pkg, null, pkg.chip);
     pkg.flashCapacityStatus = result.flashCapacityStatus;
@@ -103,7 +104,7 @@ export class FirmwareService {
       name: 'Custom ESP32-S3 Firmware', version: 'Custom Build', chip: 'ESP32-S3', board: 'Seeed Studio XIAO ESP32S3 Sense',
       flashMode: 'dio', flashFreq: '80m', flashSize: '8MB', files: binaries,
       totalSize: binaries.reduce((acc, f) => acc + f.size, 0), source: 'custom', trustLevel: 'unverified_custom',
-      trustReason: 'Manual binary upload; authenticity and flash capacity require explicit verification.',
+      trustReason: 'Manual binary upload; authenticity is not established and physical flash capacity must be detected before flashing.',
     };
     const result = FirmwareValidator.validatePackage(pkg, null, 'ESP32-S3');
     pkg.flashCapacityStatus = result.flashCapacityStatus;
