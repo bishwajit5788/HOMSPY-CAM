@@ -7,13 +7,11 @@ import { verifyManifestSignature } from './firmwareTrust';
 export class FirmwareService {
   public async loadBuiltinCameraPackage(): Promise<FirmwarePackage> {
     const basePath = '/firmware/xiao_esp32s3_camera';
-    const manifestUrl = `${basePath}/manifest.json`;
-    const manifestRes = await fetch(manifestUrl);
+    const manifestRes = await fetch(`${basePath}/manifest.json`);
     if (!manifestRes.ok) throw new Error(`Failed to load built-in manifest (${manifestRes.status})`);
     const manifest: FirmwareManifest = await manifestRes.json();
     this.validateManifest(manifest);
     if (!(await verifyManifestSignature(manifest))) throw new Error('Built-in firmware manifest signature verification failed. Refusing to trust bundled firmware.');
-
     const binaries: FirmwareBinary[] = [];
     for (const fileEntry of manifest.files) {
       if (!fileEntry.sha256) throw new Error(`Built-in firmware entry "${fileEntry.path}" is missing its pinned SHA-256 checksum.`);
@@ -28,12 +26,11 @@ export class FirmwareService {
       if (fileEntry.sha256.toLowerCase() !== sha256.toLowerCase()) throw new Error(`Firmware SHA-256 mismatch for "${fileEntry.path}".`);
       binaries.push({ id: `builtin-${fileEntry.path}`, fileName: fileEntry.path, offsetHex: formatHexAddress(offsetNum), offsetNum, data: uint8, size: uint8.byteLength, sha256, md5, isValid: uint8.byteLength > 0, description: fileEntry.description });
     }
-
     const pkg: FirmwarePackage = {
       name: manifest.name, version: manifest.version, chip: manifest.chip, board: manifest.board, description: manifest.description,
-      flashMode: manifest.flash_mode || 'dio', flashFreq: manifest.flash_freq || '80m', flashSize: manifest.flash_size || '8MB',
-      files: binaries, totalSize: binaries.reduce((acc, f) => acc + f.size, 0), source: 'builtin',
-      trustLevel: 'official_verified', trustReason: `Official built-in firmware with pinned SHA-256 checksums and verified release signature (${manifest.signature?.keyId}).`, signature: manifest.signature,
+      flashMode: manifest.flash_mode || 'dio', flashFreq: manifest.flash_freq || '80m', flashSize: manifest.flash_size || '8MB', files: binaries,
+      totalSize: binaries.reduce((acc, f) => acc + f.size, 0), source: 'builtin', trustLevel: 'official_verified',
+      trustReason: `Official built-in firmware with pinned SHA-256 checksums and verified release signature (${manifest.signature?.keyId}).`, signature: manifest.signature,
     };
     const result = FirmwareValidator.validatePackage(pkg, null, manifest.chip);
     pkg.flashCapacityStatus = result.flashCapacityStatus;
@@ -51,6 +48,7 @@ export class FirmwareService {
     try { manifest = JSON.parse(manifestText); } catch { throw new Error('Malformed manifest JSON.'); }
     this.validateManifest(manifest);
     const signed = await verifyManifestSignature(manifest);
+    const fileMap = new Map(files.map((f) => [f.name.toLowerCase(), f]));
     const binaries: FirmwareBinary[] = [];
     for (const entry of manifest.files) {
       if (!entry.sha256) throw new Error(`Manifest entry "${entry.path}" has no SHA-256 checksum. Every manifest binary must pin SHA-256.`);
