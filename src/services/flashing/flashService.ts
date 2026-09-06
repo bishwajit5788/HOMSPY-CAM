@@ -6,6 +6,8 @@ import { logService } from '../logger/logService';
 import { FirmwareValidator } from '../firmware/firmwareValidator';
 import { isValidTransition } from '../state/stateTransitions';
 import { portCoordinator } from '../port/portCoordinator';
+import { flashRecoveryService } from '../recovery/flashRecoveryService';
+import { firmwareRollbackService } from '../firmware/firmwareRollbackService';
 
 type StateListener = (details: StateDetails) => void;
 type ProgressListener = (progress: FlashProgress) => void;
@@ -29,6 +31,7 @@ export class FlashService {
   public get isBusy(): boolean { return this.isOperationActive; }
   public get port(): SerialPort | null { return this.activePort; }
   public get operationId(): number { return this.currentOperationId; }
+  public get recoveryRecord() { return flashRecoveryService.get(); }
   public subscribeState(listener: StateListener): () => void { this.stateListeners.add(listener); listener(this.getStateDetails()); return () => this.stateListeners.delete(listener); }
   public subscribeProgress(listener: ProgressListener): () => void { this.progressListeners.add(listener); listener(this.currentProgress); return () => this.progressListeners.delete(listener); }
   public getStateDetails(): StateDetails { return { state: this.currentState, message: this.stateMessage, error: this.stateError, troubleshooting: this.troubleshootingSteps }; }
@@ -76,10 +79,12 @@ export class FlashService {
       this.detectedChip = chip;
       if (!chip.chipName.toUpperCase().includes('ESP32-S3')) logService.addLog(`Warning: Connected chip is "${chip.chipName}", primary target is ESP32-S3.`, 'flasher');
       if (!chip.flashSize) logService.addLog('WARNING: Physical flash capacity could not be detected. Flashing is blocked until it is known.', 'error');
+      const recovery = flashRecoveryService.get();
+      if (recovery?.interrupted) logService.addLog(`RECOVERY AVAILABLE: interrupted ${recovery.phase} operation for ${recovery.packageName} ${recovery.version}. A matching package will restart from a clean erase.`, 'hardware');
       this.setState('BOOTLOADER_READY', `${chip.chipName} detected & synchronized. Bootloader ready.`);
       return chip;
     } catch (err: unknown) {
-      if (this.isCurrentOperation(opId)) this.setState('ERROR', 'Failed to synchronize with ESP32-S3 bootloader.', err instanceof Error ? err.message : String(err), ['Verify the USB cable is data-capable.', 'Place the XIAO ESP32S3 into bootloader mode and retry.']);
+      if (this.isCurrentOperation(opId)) this.setState('ERROR', 'Failed to synchronize with ESP32-S3 bootloader.', err instanceof Error ? err.message : String(err), ['Verify the USB cable is data-capable.', 'Place the XIAO ESP32S3 into bootloader mode and retry.', 'If the device recently reset, wait for the USB serial port to re-enumerate and reconnect.']);
       await portCoordinator.releaseLease('flasher');
       throw err;
     } finally {
@@ -92,9 +97,10 @@ export class FlashService {
     this.isOperationActive = false;
     this.activePort = null;
     this.detectedChip = null;
+    flashRecoveryService.markInterrupted();
     void portCoordinator.releaseLease('flasher');
     this.updateProgress({ stage: 'failed', stageText: 'USB device disconnected' });
-    this.setState('ERROR', 'USB device disconnected unexpectedly.', 'The serial connection was severed because the device was unplugged or reset.', ['Reconnect the USB cable securely.', 'Return the board to bootloader mode if flashing was interrupted.', 'Connect the device again.']);
+    this.setState('ERROR', 'USB device disconnected unexpectedly.', 'The serial connection was severed because the device was unplugged or reset.', ['Reconnect the USB cable securely.', 'Return the board to bootloader mode if flashing was interrupted.', 'Connect the device again; recovery state is retained so the matching package can be restarted safely.']);
   }
 
   public async eraseFlash(): Promise<void> {
@@ -123,10 +129,12 @@ export class FlashService {
   public async startFlashing(pkg: FirmwarePackage, config: FlashConfig): Promise<void> {
     if (this.isOperationActive) throw new Error('An operation is already in progress. Please wait.');
     if (!this.detectedChip) throw new Error('No ESP32 device connected. Connect to your device first.');
+    const rollback = firmwareRollbackService.check(pkg);
+    if (!rollback.allowed) throw new Error(rollback.reason);
     const opId = this.nextOperationId();
     this.isOperationActive = true;
-    this.setState('VALIDATING', 'Validating firmware package integrity and hardware bounds...');
-    this.updateProgress({ stage: 'validating', stageText: 'Validating binary offsets, SHA-256 integrity, image headers, and detected flash bounds...', percentage: 2 });
+    this.setState('VALIDATING', 'Validating firmware integrity, authenticity, rollback policy, and hardware bounds...');
+    this.updateProgress({ stage: 'validating', stageText: 'Validating checksums, release signature, image headers, rollback policy, and detected flash bounds...', percentage: 2 });
 
     const detectedCapacityBytes = FirmwareValidator.parseFlashCapacityBytes(this.detectedChip.flashSize);
     if (detectedCapacityBytes === null) {
@@ -146,16 +154,25 @@ export class FlashService {
     }
     for (const warning of validationResult.warnings) logService.addLog(`Validation notice: ${warning.message}`, 'system');
 
+    const recoveryMatch = flashRecoveryService.matches(pkg);
+    if (recoveryMatch) {
+      logService.addLog('SAFE RECOVERY: matching interrupted flash detected. Restarting from a clean full-chip erase instead of attempting an unsafe partial resume.', 'hardware');
+      config = { ...config, eraseAll: true };
+    }
+    flashRecoveryService.begin(pkg, 'validating', config);
+
     const totalPayloadBytes = pkg.files.reduce((acc, f) => acc + f.size, 0);
     const startTime = Date.now();
     try {
       if (config.eraseAll) {
+        flashRecoveryService.update(pkg, 'erasing', 0, 0);
         this.setState('ERASING', 'Erasing entire flash memory before write...');
         this.updateProgress({ stage: 'erasing', stageText: 'Erasing flash memory before writing...', percentage: 5 });
         await esp32Service.eraseFlash();
         if (!this.isCurrentOperation(opId)) return;
       }
 
+      flashRecoveryService.update(pkg, 'writing', 0, 0);
       this.setState('FLASHING', `Writing ${pkg.name} (${pkg.files.length} segments)...`);
       this.updateProgress({ stage: 'writing', stageText: `Writing ${pkg.files.length} segment(s)...`, totalFiles: pkg.files.length, totalBytes: totalPayloadBytes, percentage: 10 });
       const detectedFlashSize = this.detectedChip.flashSize?.replace(/^detected:/, '');
@@ -167,26 +184,40 @@ export class FlashService {
           const elapsed = Math.max(0.1, (Date.now() - startTime) / 1000);
           const previous = pkg.files.slice(0, fileIdx).reduce((acc, f) => acc + f.size, 0);
           const accumulated = previous + written;
+          flashRecoveryService.update(pkg, 'writing', fileIdx, accumulated);
           this.updateProgress({ stage: 'writing', stageText: `Writing ${fileName} (${accumulated} / ${totalPayloadBytes} bytes)...`, fileIndex: fileIdx + 1, totalFiles: pkg.files.length, currentFileName: fileName, writtenBytes: accumulated, totalBytes: totalPayloadBytes, percentage: Math.min(95, Math.max(10, Math.round((accumulated / totalPayloadBytes) * 100))), elapsedSeconds: elapsed, speedKbps: Math.round((accumulated / 1024) / elapsed) });
         },
         (fileName, hash) => { if (this.isCurrentOperation(opId)) logService.addLog(`[VERIFIED] ${fileName}: esptool-js post-write MD5 verification succeeded (${hash}).`, 'flasher'); }
       );
       if (!this.isCurrentOperation(opId)) return;
 
+      flashRecoveryService.update(pkg, 'verifying', pkg.files.length, totalPayloadBytes);
       this.setState('VERIFYING', 'On-chip SPI flash readback MD5 verification completed by esptool-js.');
       this.updateProgress({ stage: 'verifying', stageText: 'SPI flash readback verification complete...', percentage: 98 });
+      flashRecoveryService.update(pkg, 'resetting', pkg.files.length, totalPayloadBytes);
       this.setState('RESETTING', 'Transmitting reset pulse to ESP32-S3...');
       this.updateProgress({ stage: 'resetting', stageText: 'Resetting ESP32-S3 into execution mode...', percentage: 99 });
       await esp32Service.resetDevice();
       if (!this.isCurrentOperation(opId)) return;
+      firmwareRollbackService.recordSuccessfulFlash(pkg);
+      flashRecoveryService.clear();
       this.updateProgress({ stage: 'complete', stageText: 'Flashing and verification complete! Device reset.', percentage: 100, writtenBytes: totalPayloadBytes, totalBytes: totalPayloadBytes });
       this.setState('FLASH_COMPLETE', 'Firmware flashed, readback-verified, and device reset successfully.');
     } catch (err: unknown) {
-      if (this.isCurrentOperation(opId)) this.setState('ERROR', 'Firmware flashing failed.', err instanceof Error ? err.message : String(err), ['Keep the board connected and in bootloader mode.', 'If the write timed out or the device disconnected, reconnect and retry.']);
+      flashRecoveryService.markInterrupted();
+      if (this.isCurrentOperation(opId)) this.setState('ERROR', 'Firmware flashing failed.', err instanceof Error ? err.message : String(err), ['Keep the board connected and in bootloader mode.', 'Reconnect and retry the same package; a matching interrupted operation will be recovered with a clean erase.', 'If the browser lost the device, re-enter bootloader mode before retrying.']);
       throw err;
     } finally {
       if (this.isCurrentOperation(opId)) this.isOperationActive = false;
     }
+  }
+
+  public async cancelActiveOperation(): Promise<void> {
+    if (!this.isOperationActive) return;
+    logService.addLog('CANCEL requested: invalidating the active operation and tearing down the serial transport.', 'hardware');
+    this.invalidateCurrentOperation();
+    flashRecoveryService.markInterrupted();
+    await this.disconnect();
   }
 
   public async disconnect(): Promise<void> {
