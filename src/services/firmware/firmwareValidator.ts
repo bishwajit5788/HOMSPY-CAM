@@ -21,7 +21,6 @@ export class FirmwareValidator {
     for (const [idx, entry] of m.files.entries()) this.validateManifestEntry(entry, idx, errors, warnings);
     return { isValid: errors.length === 0, errors, warnings, flashCapacityStatus: 'unknown' };
   }
-
   private static validateManifestEntry(entry: unknown, index: number, errors: ValidationError[], warnings: ValidationError[]): void {
     if (!entry || typeof entry !== 'object') { errors.push({ field: `files[${index}]`, message: `File entry at index ${index} is not an object.`, severity: 'error' }); return; }
     const f = entry as Partial<ManifestFileEntry>;
@@ -31,10 +30,8 @@ export class FirmwareValidator {
     else { const offsetNum = parseHexAddress(String(f.offset)); if (!Number.isSafeInteger(offsetNum) || offsetNum < 0) errors.push({ field: `files[${index}].offset`, message: `Invalid offset "${f.offset}".`, severity: 'error' }); else if (offsetNum % 4 !== 0) errors.push({ field: `files[${index}].offset`, message: `Offset 0x${offsetNum.toString(16)} must be 4-byte aligned.`, severity: 'error' }); }
     const declaredSize = f.size ?? f.expectedSize;
     if (declaredSize !== undefined && (typeof declaredSize !== 'number' || !Number.isSafeInteger(declaredSize) || declaredSize <= 0)) errors.push({ field: `files[${index}].size`, message: 'Declared size must be a positive safe integer byte count.', severity: 'error' });
-    if (f.sha256 !== undefined) { if (!/^[a-fA-F0-9]{64}$/.test(f.sha256)) errors.push({ field: `files[${index}].sha256`, message: 'Invalid SHA-256 hash format.', severity: 'error' }); }
-    else warnings.push({ field: `files[${index}].sha256`, message: `File "${f.path}" does not declare a SHA-256 checksum.`, severity: 'warning' });
+    if (f.sha256 !== undefined) { if (!/^[a-fA-F0-9]{64}$/.test(f.sha256)) errors.push({ field: `files[${index}].sha256`, message: 'Invalid SHA-256 hash format.', severity: 'error' }); } else warnings.push({ field: `files[${index}].sha256`, message: `File "${f.path}" does not declare a SHA-256 checksum.`, severity: 'warning' });
   }
-
   public static validatePackage(pkg: FirmwarePackage, detectedCapacityBytes?: number | null, expectedChip = 'ESP32-S3'): ValidationResult {
     const errors: ValidationError[] = [], warnings: ValidationError[] = [];
     if (!pkg.files?.length) { errors.push({ field: 'files', message: 'Firmware package contains no binary files.', severity: 'error' }); return { isValid: false, errors, warnings, flashCapacityStatus: 'unknown' }; }
@@ -61,13 +58,10 @@ export class FirmwareValidator {
     else { for (const bin of pkg.files) { const end = bin.offsetNum + bin.size; if (!Number.isSafeInteger(end) || end < bin.offsetNum) { flashCapacityStatus = 'exceeded'; errors.push({ field: 'flash_capacity', message: `Address overflow detected for "${bin.fileName}".`, severity: 'error' }); } else if (end > detectedCapacityBytes) { flashCapacityStatus = 'exceeded'; errors.push({ field: 'flash_capacity', message: `File "${bin.fileName}" exceeds detected flash capacity.`, severity: 'error' }); } } }
     return { isValid: errors.length === 0, errors, warnings, flashCapacityStatus };
   }
-
   public static parseFlashCapacityBytes(flashSizeStr?: string): number | null {
-    if (!flashSizeStr) return null;
-    const clean = flashSizeStr.toLowerCase().startsWith('detected:') ? flashSizeStr.slice('detected:'.length) : flashSizeStr;
-    const normalized = clean.toUpperCase().replace(/\s/g, '');
-    const match = normalized.match(/^(\d+(?:\.\d+)?)(MB|KB)$/);
-    if (!match) return null;
+    if (!flashSizeStr || !flashSizeStr.toLowerCase().startsWith('detected:')) return null;
+    const normalized = flashSizeStr.slice('detected:'.length).toUpperCase().replace(/\s/g, '');
+    const match = normalized.match(/^(\d+(?:\.\d+)?)(MB|KB)$/); if (!match) return null;
     const value = Number(match[1]); if (!Number.isFinite(value) || value <= 0) return null;
     return match[2] === 'MB' ? value * 1024 * 1024 : value * 1024;
   }
