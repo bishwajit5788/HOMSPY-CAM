@@ -7,7 +7,6 @@ export interface ValidationResult { isValid: boolean; errors: ValidationError[];
 export const ESP_CHIP_IDS: Record<number, string> = { 0x00: 'ESP32', 0x02: 'ESP32-S2', 0x05: 'ESP32-C3', 0x09: 'ESP32-S3', 0x0c: 'ESP32-C2', 0x0d: 'ESP32-C6', 0x10: 'ESP32-H2', 0x12: 'ESP32-P4' };
 const ESP_IMAGE_MAGIC = 0xe9;
 const ESP_IMAGE_HEADER_SIZE = 24;
-const ESP_IMAGE_MAX_SEGMENTS = 16;
 const ESP32_S3_CHIP_ID = 0x0009;
 
 export class FirmwareValidator {
@@ -61,15 +60,12 @@ export class FirmwareValidator {
       if (bin.offsetNum === 0 || bin.offsetNum >= 0x10000) {
         if (bin.data.byteLength < ESP_IMAGE_HEADER_SIZE) errors.push({ field: `files[${idx}].header`, message: `Executable image "${bin.fileName}" is too small; minimum 24 bytes required.`, severity: 'error' });
         else {
-          const magic = bin.data[0];
-          if (magic !== ESP_IMAGE_MAGIC) errors.push({ field: `files[${idx}].header`, message: `Invalid ESP image magic in "${bin.fileName}"; expected 0xE9.`, severity: 'error' });
+          if (bin.data[0] !== ESP_IMAGE_MAGIC) errors.push({ field: `files[${idx}].header`, message: `Invalid ESP image magic in "${bin.fileName}"; expected 0xE9.`, severity: 'error' });
           const chipId = bin.data[12] | (bin.data[13] << 8);
           if (expectedChip.toUpperCase().includes('ESP32-S3') && chipId !== ESP32_S3_CHIP_ID) {
             const detectedName = ESP_CHIP_IDS[chipId] || `Unknown (0x${chipId.toString(16).padStart(4, '0')})`;
             errors.push({ field: `files[${idx}].chip_id`, message: `Chip architecture mismatch in "${bin.fileName}"; header chip ID is 0x${chipId.toString(16).padStart(4, '0')} (${detectedName}), expected ESP32-S3 (0x0009).`, severity: 'error' });
           }
-          const segmentCount = bin.data[1];
-          if (segmentCount === 0 || segmentCount > ESP_IMAGE_MAX_SEGMENTS) errors.push({ field: `files[${idx}].segment_count`, message: `Invalid ESP image segment count ${segmentCount} in "${bin.fileName}"; expected 1-${ESP_IMAGE_MAX_SEGMENTS}.`, severity: 'error' });
           if (bin.data[23] !== 0 && bin.data[23] !== 1) errors.push({ field: `files[${idx}].header`, message: `Invalid hash_appended field in "${bin.fileName}"; expected 0 or 1.`, severity: 'error' });
         }
       }
@@ -99,7 +95,6 @@ export class FirmwareValidator {
     return { isValid: errors.length === 0, errors, warnings, flashCapacityStatus };
   }
 
-  /** Parses only a value explicitly marked as detected hardware capacity. UI configuration values are intentionally rejected. */
   public static parseFlashCapacityBytes(flashSizeStr?: string): number | null {
     if (!flashSizeStr || !flashSizeStr.toLowerCase().startsWith('detected:')) return null;
     const clean = flashSizeStr.slice('detected:'.length).toUpperCase().replace(/\s/g, '');
