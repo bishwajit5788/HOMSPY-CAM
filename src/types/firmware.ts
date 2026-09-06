@@ -5,6 +5,9 @@ export interface ManifestFileEntry {
   offset: string;
   description?: string;
   size?: number;
+  expectedSize?: number;
+  sha256?: string;
+  md5?: string;
 }
 
 export interface FirmwareManifest {
@@ -26,6 +29,7 @@ export interface FirmwareBinary {
   offsetNum: number;
   data: Uint8Array;
   size: number;
+  sha256: string;
   md5: string;
   isValid: boolean;
   validationError?: string;

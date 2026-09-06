@@ -4,7 +4,8 @@ import type {
   FirmwareBinary,
 } from '../../types/firmware';
 import { parseHexAddress, formatHexAddress } from '../../utils/formatters';
-import { computeMD5 } from '../../utils/md5';
+import { computeMD5, computeSHA256 } from '../../utils/crypto';
+import { FirmwareValidator } from './firmwareValidator';
 
 export class FirmwareService {
   /**
@@ -35,6 +36,25 @@ export class FirmwareService {
       const uint8 = new Uint8Array(buffer);
       const offsetNum = parseHexAddress(fileEntry.offset);
       const md5 = computeMD5(uint8);
+      const sha256 = await computeSHA256(uint8);
+
+      // Verify file size if specified in manifest
+      if (fileEntry.size !== undefined && uint8.byteLength !== fileEntry.size) {
+        throw new Error(
+          `Payload size mismatch for "${fileEntry.path}". Expected ${fileEntry.size} bytes, but received ${uint8.byteLength} bytes.`
+        );
+      }
+
+      // Verify cryptographic SHA-256 integrity if specified in manifest
+      if (fileEntry.sha256) {
+        const expected = fileEntry.sha256.toLowerCase();
+        const actual = sha256.toLowerCase();
+        if (expected !== actual) {
+          throw new Error(
+            `Firmware integrity validation FAILED for "${fileEntry.path}". SHA-256 mismatch!\nExpected: ${expected}\nComputed: ${actual}`
+          );
+        }
+      }
 
       binaries.push({
         id: `builtin-${fileEntry.path}`,
@@ -43,6 +63,7 @@ export class FirmwareService {
         offsetNum,
         data: uint8,
         size: uint8.byteLength,
+        sha256,
         md5,
         isValid: uint8.byteLength > 0,
         description: fileEntry.description,
@@ -51,7 +72,7 @@ export class FirmwareService {
 
     const totalSize = binaries.reduce((acc, f) => acc + f.size, 0);
 
-    return {
+    const pkg: FirmwarePackage = {
       name: manifest.name || 'XIAO ESP32S3 Camera',
       version: manifest.version || '1.0.0',
       chip: manifest.chip || 'ESP32-S3',
@@ -64,29 +85,23 @@ export class FirmwareService {
       totalSize,
       source: 'builtin',
     };
+
+    // Run deep structural package validation
+    const valResult = FirmwareValidator.validatePackage(pkg, 8 * 1024 * 1024, 'ESP32-S3');
+    if (!valResult.isValid) {
+      throw new Error(valResult.errors.map((e) => e.message).join('\n'));
+    }
+
+    return pkg;
   }
 
   /**
    * Validates manifest structure and required attributes.
    */
   public validateManifest(manifest: unknown): asserts manifest is FirmwareManifest {
-    if (!manifest || typeof manifest !== 'object') {
-      throw new Error('Invalid manifest: Expected a JSON object.');
-    }
-    const m = manifest as Partial<FirmwareManifest>;
-    if (!m.name || typeof m.name !== 'string') {
-      throw new Error('Manifest validation error: Missing or invalid "name" string.');
-    }
-    if (!m.files || !Array.isArray(m.files) || m.files.length === 0) {
-      throw new Error('Manifest validation error: "files" array must contain at least one binary file.');
-    }
-    for (const [idx, f] of m.files.entries()) {
-      if (!f.path || typeof f.path !== 'string') {
-        throw new Error(`Manifest file entry at index ${idx} is missing a valid "path".`);
-      }
-      if (f.offset === undefined || f.offset === null) {
-        throw new Error(`Manifest file "${f.path}" is missing an "offset" definition.`);
-      }
+    const result = FirmwareValidator.validateManifestSchema(manifest);
+    if (!result.isValid) {
+      throw new Error(result.errors.map((e) => e.message).join('\n'));
     }
   }
 
@@ -125,6 +140,25 @@ export class FirmwareService {
       const uint8 = new Uint8Array(buffer);
       const offsetNum = parseHexAddress(entry.offset);
       const md5 = computeMD5(uint8);
+      const sha256 = await computeSHA256(uint8);
+
+      // Verify file size if specified
+      if (entry.size !== undefined && uint8.byteLength !== entry.size) {
+        throw new Error(
+          `Payload size mismatch for "${matchedFile.name}". Expected ${entry.size} bytes, but received ${uint8.byteLength} bytes.`
+        );
+      }
+
+      // Verify SHA-256 checksum if declared
+      if (entry.sha256) {
+        const expected = entry.sha256.toLowerCase();
+        const actual = sha256.toLowerCase();
+        if (expected !== actual) {
+          throw new Error(
+            `Firmware integrity validation FAILED for "${matchedFile.name}". SHA-256 mismatch!\nExpected: ${expected}\nComputed: ${actual}`
+          );
+        }
+      }
 
       binaries.push({
         id: `manifest-${matchedFile.name}-${Date.now()}`,
@@ -133,6 +167,7 @@ export class FirmwareService {
         offsetNum,
         data: uint8,
         size: uint8.byteLength,
+        sha256,
         md5,
         isValid: uint8.byteLength > 0,
         description: entry.description,
@@ -141,7 +176,7 @@ export class FirmwareService {
 
     const totalSize = binaries.reduce((acc, f) => acc + f.size, 0);
 
-    return {
+    const pkg: FirmwarePackage = {
       name: manifest.name,
       version: manifest.version || '1.0.0',
       chip: manifest.chip || 'ESP32-S3',
@@ -154,6 +189,13 @@ export class FirmwareService {
       totalSize,
       source: 'manifest',
     };
+
+    const valResult = FirmwareValidator.validatePackage(pkg, undefined, pkg.chip);
+    if (!valResult.isValid) {
+      throw new Error(valResult.errors.map((e) => e.message).join('\n'));
+    }
+
+    return pkg;
   }
 
   /**
@@ -173,6 +215,7 @@ export class FirmwareService {
       const uint8 = new Uint8Array(buffer);
       const offsetNum = parseHexAddress(item.offsetHex);
       const md5 = computeMD5(uint8);
+      const sha256 = await computeSHA256(uint8);
 
       let isValid = true;
       let validationError: string | undefined;
@@ -189,6 +232,7 @@ export class FirmwareService {
         offsetNum,
         data: uint8,
         size: uint8.byteLength,
+        sha256,
         md5,
         isValid,
         validationError,
@@ -198,7 +242,7 @@ export class FirmwareService {
 
     const totalSize = binaries.reduce((acc, f) => acc + f.size, 0);
 
-    return {
+    const pkg: FirmwarePackage = {
       name: 'Custom ESP32-S3 Firmware',
       version: 'Custom Build',
       chip: 'ESP32-S3',
@@ -210,6 +254,13 @@ export class FirmwareService {
       totalSize,
       source: 'custom',
     };
+
+    const valResult = FirmwareValidator.validatePackage(pkg, undefined, 'ESP32-S3');
+    if (!valResult.isValid) {
+      throw new Error(valResult.errors.map((e) => e.message).join('\n'));
+    }
+
+    return pkg;
   }
 }
 

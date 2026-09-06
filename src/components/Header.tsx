@@ -32,14 +32,22 @@ export const Header: React.FC<HeaderProps> = ({
         return { text: 'Detecting ROM...', color: 'badge-blue animate-pulse' };
       case 'BOOTLOADER_READY':
         return { text: 'Bootloader Ready', color: 'badge-emerald' };
+      case 'VALIDATING':
+        return { text: 'Validating...', color: 'badge-blue animate-pulse' };
+      case 'ERASING':
+        return { text: 'Erasing Flash...', color: 'badge-amber animate-pulse' };
       case 'FLASHING':
         return { text: 'Flashing...', color: 'badge-purple animate-pulse' };
       case 'VERIFYING':
         return { text: 'Verifying MD5...', color: 'badge-cyan animate-pulse' };
+      case 'RESETTING':
+        return { text: 'Resetting...', color: 'badge-cyan animate-pulse' };
       case 'FLASH_COMPLETE':
         return { text: 'Flash Complete', color: 'badge-emerald' };
       case 'ERROR':
         return { text: 'Error', color: 'badge-rose' };
+      case 'DISCONNECTING':
+        return { text: 'Disconnecting...', color: 'badge-gray animate-pulse' };
       default:
         return { text: state, color: 'badge-gray' };
     }
@@ -57,7 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h1 className="header-title">ESP32-S3 Programmer</h1>
-              <span className="version-pill">v1.0 Pro</span>
+              <span className="version-pill">v0.9.0-rc.1</span>
             </div>
             <p className="header-subtitle">
               Native Web Serial Flasher & Diagnostics for <strong>Seeed Studio XIAO ESP32S3 Sense</strong>

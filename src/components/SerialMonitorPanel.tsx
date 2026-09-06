@@ -51,18 +51,21 @@ export const SerialMonitorPanel: React.FC<SerialMonitorPanelProps> = ({
   // Filter logs if paused
   const [frozenLogs, setFrozenLogs] = useState<SerialLogEntry[]>([]);
 
-  useEffect(() => {
+  const handleTogglePause = () => {
     if (!isPaused) {
-      setFrozenLogs(logs);
+      setFrozenLogs([...logs]);
     }
-  }, [logs, isPaused]);
+    setIsPaused((prev) => !prev);
+  };
+
+  const displayedLogs = isPaused ? frozenLogs : logs;
 
   // Auto-scroll to bottom
   useEffect(() => {
     if (autoScroll && terminalRef.current && !isPaused) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
-  }, [frozenLogs, autoScroll, isPaused]);
+  }, [displayedLogs, autoScroll, isPaused]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,7 +152,7 @@ export const SerialMonitorPanel: React.FC<SerialMonitorPanelProps> = ({
           <button
             type="button"
             className={`btn btn-secondary btn-xs ${isPaused ? 'bg-amber-900 text-amber-300' : ''}`}
-            onClick={() => setIsPaused(!isPaused)}
+            onClick={handleTogglePause}
             title={isPaused ? 'Resume live terminal stream' : 'Pause terminal display'}
           >
             <Pause className="w-3 h-3" />
@@ -194,12 +197,12 @@ export const SerialMonitorPanel: React.FC<SerialMonitorPanelProps> = ({
       <div className="panel-body flex-1 flex flex-col p-0">
         {/* Terminal Screen */}
         <div ref={terminalRef} className="terminal-display flex-1">
-          {frozenLogs.length === 0 ? (
+          {displayedLogs.length === 0 ? (
             <div className="terminal-placeholder">
               <span>[Terminal idle. Click "Start Monitor" to listen on {baudRate} baud.]</span>
             </div>
           ) : (
-            frozenLogs.map((entry) => (
+            displayedLogs.map((entry) => (
               <div key={entry.id} className={`terminal-line line-${entry.type}`}>
                 <span className="line-ts">{entry.timestamp}</span>
                 <span className="line-text">{entry.text}</span>

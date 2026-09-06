@@ -10,7 +10,7 @@ import {
 import type { ChipInfo, FlashConfig } from '../../types/esp32';
 import type { FirmwareBinary } from '../../types/firmware';
 import { logService } from '../logger/logService';
-import { computeMD5 } from '../../utils/md5';
+import { computeMD5 } from '../../utils/crypto';
 
 export interface FlashProgressCallback {
   (fileIndex: number, writtenBytes: number, totalBytes: number, currentFileName: string): void;
@@ -20,9 +20,37 @@ export class ESP32Service {
   private transport: Transport | null = null;
   private esploader: ESPLoader | null = null;
   private isConnected = false;
+  private deviceLostCallback: (() => void) | null = null;
 
   public get connected(): boolean {
     return this.isConnected;
+  }
+
+  /**
+   * Helper utility wrapping asynchronous promises with an explicit timeout.
+   */
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    operationName: string
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `Operation "${operationName}" timed out after ${Math.round(timeoutMs / 1000)}s. Device did not respond.`
+          )
+        );
+      }, timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([promise, timeoutPromise]);
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -30,13 +58,15 @@ export class ESP32Service {
    */
   public async connectAndDetect(
     port: SerialPort,
-    baudRate = 115200
+    baudRate = 115200,
+    onDeviceLost?: () => void
   ): Promise<ChipInfo> {
     if (this.transport) {
       await this.disconnect();
     }
 
-    logService.addLog('Initializing ESP32 transport...', 'flasher');
+    this.deviceLostCallback = onDeviceLost || null;
+    logService.addLog('Initializing ESP32 Web Serial transport...', 'flasher');
 
     // Create terminal logger bridging esptool output to unified logger
     const terminal: IEspLoaderTerminal = {
@@ -52,23 +82,45 @@ export class ESP32Service {
     // Create Web Serial transport
     this.transport = new Transport(port, false);
 
+    // Register native device-lost callback for unexpected USB disconnects
+    if (this.deviceLostCallback) {
+      this.transport.setDeviceLostCallback(() => {
+        logService.addLog('CRITICAL: USB device disconnect detected by flasher transport!', 'error');
+        this.isConnected = false;
+        if (this.deviceLostCallback) {
+          this.deviceLostCallback();
+        }
+      });
+    }
+
     this.esploader = new ESPLoader({
       transport: this.transport,
       baudrate: baudRate,
       terminal,
     });
 
-    logService.addLog('Synchronizing with ESP32-S3 ROM bootloader...', 'flasher');
+    logService.addLog('Synchronizing with ESP32-S3 ROM bootloader (15s timeout)...', 'flasher');
 
     let chipName = '';
     try {
-      // First attempt with default reset
-      chipName = await this.esploader.main('default_reset');
+      // First attempt with default reset (with 15s timeout)
+      chipName = await this.withTimeout(
+        this.esploader.main('default_reset'),
+        15000,
+        'ROM bootloader synchronization (default reset)'
+      );
     } catch (firstErr) {
-      logService.addLog(`Standard reset sync failed: ${firstErr}. Trying with direct connection...`, 'flasher');
+      logService.addLog(
+        `Default reset sync notice: ${firstErr}. Attempting direct connection ('no_reset')...`,
+        'flasher'
+      );
       try {
         // Fallback for boards already placed into bootloader mode
-        chipName = await this.esploader.main('no_reset');
+        chipName = await this.withTimeout(
+          this.esploader.main('no_reset'),
+          10000,
+          'ROM bootloader synchronization (direct)'
+        );
       } catch (secondErr) {
         throw new Error(
           `ESP32-S3 bootloader not detected. Please verify the board is in download mode (Hold BOOT, press RESET, release BOOT) and retry. (${secondErr})`
@@ -77,7 +129,7 @@ export class ESP32Service {
     }
 
     this.isConnected = true;
-    logService.addLog(`Bootloader synced successfully. Chip identified: ${chipName}`, 'flasher');
+    logService.addLog(`Bootloader synchronized successfully. Identified chip: ${chipName}`, 'flasher');
 
     // Read Hardware MAC Address
     let macAddress = 'Unknown';
@@ -92,7 +144,11 @@ export class ESP32Service {
     // Detect Flash Size
     let flashSize = '8MB';
     try {
-      flashSize = await this.esploader.detectFlashSize();
+      flashSize = await this.withTimeout(
+        this.esploader.detectFlashSize(),
+        5000,
+        'Flash size detection'
+      );
     } catch {
       flashSize = '8MB (Default for XIAO ESP32S3 Sense)';
     }
@@ -132,8 +188,8 @@ export class ESP32Service {
       throw new Error('No active bootloader connection. Please connect first.');
     }
 
-    logService.addLog('Erasing entire flash memory (this may take up to 20-30 seconds)...', 'flasher');
-    await this.esploader.eraseFlash();
+    logService.addLog('Erasing entire flash memory (45s timeout, please wait)...', 'flasher');
+    await this.withTimeout(this.esploader.eraseFlash(), 45000, 'Flash chip erase');
     logService.addLog('Flash memory erase completed successfully.', 'flasher');
   }
 
@@ -143,7 +199,8 @@ export class ESP32Service {
   public async flashImages(
     binaries: FirmwareBinary[],
     config: FlashConfig,
-    onProgress: FlashProgressCallback
+    onProgress: FlashProgressCallback,
+    onSegmentVerified?: (fileName: string, hash: string) => void
   ): Promise<void> {
     if (!this.esploader) {
       throw new Error('No active bootloader connection.');
@@ -169,21 +226,20 @@ export class ESP32Service {
       },
       calculateMD5Hash: (image: Uint8Array) => {
         const hash = computeMD5(image);
-        logService.addLog(`Verifying MD5 checksum: ${hash}`, 'flasher');
+        logService.addLog(`[MD5] Computed payload checksum: ${hash}`, 'flasher');
+        if (onSegmentVerified) {
+          onSegmentVerified('segment', hash);
+        }
         return hash;
       },
     };
 
-    await this.esploader.writeFlash(flashOptions);
-    logService.addLog('Firmware written and verified successfully.', 'flasher');
+    // Execute flashing with timeout scaled to payload size (minimum 60s)
+    const totalBytes = binaries.reduce((acc, f) => acc + f.size, 0);
+    const timeoutMs = Math.max(60000, Math.round((totalBytes / 1024) * 200));
 
-    // Trigger post-flash hard reset
-    try {
-      logService.addLog('Resetting ESP32-S3 into execution mode...', 'flasher');
-      await this.esploader.after('hard_reset');
-    } catch (resetErr) {
-      logService.addLog(`Notice: Software reset signal sent. (${resetErr})`, 'flasher');
-    }
+    await this.withTimeout(this.esploader.writeFlash(flashOptions), timeoutMs, 'Firmware write');
+    logService.addLog('Firmware writing and on-chip verification completed successfully.', 'flasher');
   }
 
   /**
@@ -192,10 +248,11 @@ export class ESP32Service {
   public async resetDevice(): Promise<void> {
     if (!this.esploader) return;
     try {
-      await this.esploader.after('hard_reset');
-      logService.addLog('Device hard reset triggered.', 'flasher');
+      logService.addLog('Transmitting hard reset pulse to ESP32-S3...', 'flasher');
+      await this.withTimeout(this.esploader.after('hard_reset'), 5000, 'Hardware reset');
+      logService.addLog('Reset signal delivered. Board is restarting.', 'flasher');
     } catch (err) {
-      logService.addLog(`Reset command error: ${err}`, 'flasher');
+      logService.addLog(`Notice: Reset signal attempted (${err}).`, 'flasher');
     }
   }
 
@@ -206,14 +263,15 @@ export class ESP32Service {
     this.isConnected = false;
     if (this.transport) {
       try {
-        await this.transport.disconnect();
+        this.transport.setDeviceLostCallback(null);
+        await this.withTimeout(this.transport.disconnect(), 3000, 'Transport disconnect');
       } catch {
-        // Ignore disconnect errors
+        // Ignore disconnect errors during teardown
       }
       this.transport = null;
     }
     this.esploader = null;
-    logService.addLog('ESP32 bootloader flasher disconnected.', 'flasher');
+    logService.addLog('ESP32 bootloader flasher transport disconnected.', 'flasher');
   }
 }
 

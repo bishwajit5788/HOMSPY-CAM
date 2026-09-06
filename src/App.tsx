@@ -28,7 +28,7 @@ import { BoardSpecsModal } from './components/BoardSpecsModal';
 import { ErrorAlert } from './components/ErrorAlert';
 
 export function App() {
-  const browserInfo = useRef(getBrowserSupportInfo()).current;
+  const [browserInfo] = useState(() => getBrowserSupportInfo());
 
   // Board Profile
   const [selectedBoard, setSelectedBoard] = useState<BoardProfile>(DEFAULT_BOARD_PROFILE);
@@ -54,7 +54,7 @@ export function App() {
   const [baudRate, setBaudRate] = useState<BaudRate>(115200);
   const [lineEnding, setLineEnding] = useState<LineEnding>('\n');
 
-  // Modals
+  // Modals & In-Flight Status
   const [isBootloaderGuideOpen, setIsBootloaderGuideOpen] = useState(false);
   const [isBoardSpecsOpen, setIsBoardSpecsOpen] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -67,37 +67,7 @@ export function App() {
   // Reference to physical serial port
   const activeSerialPort = useRef<SerialPort | null>(null);
 
-  // 1. Subscribe to flashService state & progress, and logService logs
-  useEffect(() => {
-    const unsubState = flashService.subscribeState((details) => {
-      setStateDetails(details);
-    });
-
-    const unsubProgress = flashService.subscribeProgress((prog) => {
-      setFlashProgress(prog);
-    });
-
-    const unsubLogs = logService.subscribe((currentLogs) => {
-      setLogs(currentLogs);
-    });
-
-    // Auto-load built-in Stage 1 XIAO ESP32S3 Camera firmware on startup
-    loadBuiltinFirmware();
-
-    // Initial system log
-    logService.addLog('ESP32-S3 Programmer initialized.', 'system');
-    if (!browserInfo.isSupported) {
-      logService.addLog(`Warning: ${browserInfo.message}`, 'error');
-    }
-
-    return () => {
-      unsubState();
-      unsubProgress();
-      unsubLogs();
-    };
-  }, [browserInfo]);
-
-  // Load built-in Stage 1 package
+  // Load built-in Stage 1 package (Declared before useEffect)
   const loadBuiltinFirmware = useCallback(async () => {
     try {
       setIsLoading(true);
@@ -115,6 +85,38 @@ export function App() {
     }
   }, []);
 
+  // 1. Subscribe to flashService state & progress, and logService logs
+  useEffect(() => {
+    const unsubState = flashService.subscribeState((details) => {
+      setStateDetails(details);
+    });
+
+    const unsubProgress = flashService.subscribeProgress((prog) => {
+      setFlashProgress(prog);
+    });
+
+    const unsubLogs = logService.subscribe((currentLogs) => {
+      setLogs(currentLogs);
+    });
+
+    // Auto-load built-in Stage 1 XIAO ESP32S3 Camera firmware on startup
+    queueMicrotask(() => {
+      void loadBuiltinFirmware();
+    });
+
+    // Initial system log
+    logService.addLog('ESP32-S3 Programmer v0.9.0-rc.1 initialized.', 'system');
+    if (!browserInfo.isSupported) {
+      logService.addLog(`Warning: ${browserInfo.message}`, 'error');
+    }
+
+    return () => {
+      unsubState();
+      unsubProgress();
+      unsubLogs();
+    };
+  }, [browserInfo, loadBuiltinFirmware]);
+
   // Handle manifest package upload
   const handleLoadManifestAndFiles = async (manifestText: string, files: File[]) => {
     try {
@@ -125,7 +127,7 @@ export function App() {
     } catch (err: unknown) {
       const error = err as Error;
       logService.addLog(`Manifest loading failed: ${error.message}`, 'error');
-      alert(`Error loading manifest: ${error.message}`);
+      alert(`Error loading manifest:\n${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -216,7 +218,7 @@ export function App() {
       return;
     }
 
-    if (activeSerialPort.current) {
+    if (isMonitorOpen && activeSerialPort.current) {
       await performHardwareReset(activeSerialPort.current);
     } else {
       await flashService.resetDevice();
@@ -260,7 +262,7 @@ export function App() {
     }
 
     if (isMonitorOpen) {
-      logService.addLog('Pausing serial monitor for flashing operation...', 'system');
+      logService.addLog('Closing serial monitor to transfer port ownership to flasher...', 'system');
       await serialService.close();
       setIsMonitorOpen(false);
     }
@@ -307,7 +309,7 @@ export function App() {
         }
       }
 
-      // If flasher is holding transport, disconnect it first
+      // If flasher is holding transport, disconnect it cleanly first
       if (flashService.state !== 'DISCONNECTED') {
         await flashService.disconnect();
       }
@@ -396,7 +398,7 @@ export function App() {
               onHardwareReset={handleHardwareReset}
               onOpenBootloaderGuide={() => setIsBootloaderGuideOpen(true)}
               isConnecting={isConnecting}
-              disabled={isLoading}
+              disabled={isLoading || flashService.isBusy}
             />
 
             <FirmwarePanel
@@ -409,7 +411,7 @@ export function App() {
               onLoadCustomFiles={handleLoadCustomFiles}
               onStartFlash={handleStartFlash}
               onEraseFlash={handleEraseFlash}
-              isLoading={isLoading}
+              isLoading={isLoading || flashService.isBusy}
             />
           </div>
 

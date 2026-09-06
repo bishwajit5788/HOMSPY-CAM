@@ -1,6 +1,8 @@
 import type { BaudRate, LineEnding } from '../../types/serial';
 import { logService } from '../logger/logService';
 
+export type PortOwner = 'none' | 'flasher' | 'monitor';
+
 export class SerialService {
   private currentPort: SerialPort | null = null;
   private reader: ReadableStreamDefaultReader<string> | null = null;
@@ -8,6 +10,8 @@ export class SerialService {
   private isReading = false;
   private lineBuffer = '';
   private disconnectHandler: (() => void) | null = null;
+  private currentOwner: PortOwner = 'none';
+  private hasRegisteredDisconnectListener = false;
 
   public get port(): SerialPort | null {
     return this.currentPort;
@@ -15,6 +19,41 @@ export class SerialService {
 
   public get isOpen(): boolean {
     return this.currentPort !== null && this.isReading;
+  }
+
+  public get owner(): PortOwner {
+    return this.currentOwner;
+  }
+
+  constructor() {
+    this.registerGlobalDisconnectListener();
+  }
+
+  /**
+   * Registers global Web Serial disconnect event listener.
+   */
+  private registerGlobalDisconnectListener(): void {
+    if (typeof navigator !== 'undefined' && 'serial' in navigator && !this.hasRegisteredDisconnectListener) {
+      navigator.serial.addEventListener('disconnect', (event: Event) => {
+        const customEvent = event as Event & { port?: SerialPort };
+        if (customEvent.port && customEvent.port === this.currentPort) {
+          logService.addLog('CRITICAL: Web Serial hardware port disconnected.', 'error');
+          this.handleHardwareDisconnect();
+        }
+      });
+      this.hasRegisteredDisconnectListener = true;
+    }
+  }
+
+  /**
+   * Handles unexpected hardware detachment.
+   */
+  private async handleHardwareDisconnect(): Promise<void> {
+    const handler = this.disconnectHandler;
+    await this.close();
+    if (handler) {
+      handler();
+    }
   }
 
   /**
@@ -59,6 +98,27 @@ export class SerialService {
   }
 
   /**
+   * Acquires ownership lock on the serial port.
+   */
+  public acquireOwnership(owner: PortOwner): void {
+    if (this.currentOwner !== 'none' && this.currentOwner !== owner) {
+      throw new Error(
+        `Port conflict: Serial port is currently owned by "${this.currentOwner}". Release it before acquiring for "${owner}".`
+      );
+    }
+    this.currentOwner = owner;
+  }
+
+  /**
+   * Releases ownership lock on the serial port.
+   */
+  public releaseOwnership(owner: PortOwner): void {
+    if (this.currentOwner === owner) {
+      this.currentOwner = 'none';
+    }
+  }
+
+  /**
    * Opens the serial port for serial monitoring at the chosen baud rate.
    */
   public async openForMonitor(
@@ -66,10 +126,12 @@ export class SerialService {
     baudRate: BaudRate = 115200,
     onDisconnect?: () => void
   ): Promise<void> {
+    // If monitor is already running, shut it down first
     if (this.currentPort && this.isOpen) {
       await this.close();
     }
 
+    this.acquireOwnership('monitor');
     this.currentPort = port;
     this.disconnectHandler = onDisconnect || null;
 
@@ -84,23 +146,24 @@ export class SerialService {
 
       logService.addLog(`Serial monitor opened at ${baudRate} baud.`, 'system');
 
-      // Setup writer for serial output
+      // Setup writer for serial transmission
       if (port.writable) {
         this.writer = port.writable.getWriter();
       }
 
-      // Start asynchronous read loop
+      // Start asynchronous stream read loop
       this.isReading = true;
       this.startReadLoop(port);
     } catch (err: unknown) {
       const error = err as Error;
+      this.releaseOwnership('monitor');
       this.currentPort = null;
-      throw new Error(`Failed to open serial port: ${error.message || error}`);
+      throw new Error(`Failed to open serial port for monitoring: ${error.message || error}`);
     }
   }
 
   /**
-   * Starts reading text data from the serial port.
+   * Starts reading text data from the serial port using TransformStream.
    */
   private async startReadLoop(port: SerialPort): Promise<void> {
     if (!port.readable) return;
@@ -124,7 +187,7 @@ export class SerialService {
     } catch (err: unknown) {
       const error = err as Error;
       if (this.isReading) {
-        logService.addLog(`Serial read error: ${error.message || error}`, 'error');
+        logService.addLog(`Serial read notice: ${error.message || error}`, 'system');
         if (this.disconnectHandler) {
           this.disconnectHandler();
         }
@@ -153,11 +216,11 @@ export class SerialService {
   }
 
   /**
-   * Writes text data to the open serial port.
+   * Writes text data to the open serial port with timeout.
    */
   public async write(text: string, lineEnding: LineEnding = '\n'): Promise<void> {
     if (!this.writer) {
-      throw new Error('Serial port is not writable. Connect to the device first.');
+      throw new Error('Serial port is not writable. Connect to the device and start the monitor first.');
     }
 
     const payload = `${text}${lineEnding}`;
@@ -169,18 +232,18 @@ export class SerialService {
       logService.addLog(`TX > ${text}`, 'tx');
     } catch (err: unknown) {
       const error = err as Error;
-      logService.addLog(`Failed to send data: ${error.message}`, 'error');
+      logService.addLog(`Failed to transmit serial data: ${error.message}`, 'error');
       throw error;
     }
   }
 
   /**
-   * Closes the active serial monitor connection cleanly.
+   * Closes the active serial monitor connection cleanly, unlocking streams.
    */
   public async close(): Promise<void> {
     this.isReading = false;
 
-    // Flush remaining line buffer
+    // Flush any remaining partial line
     if (this.lineBuffer.trim().length > 0) {
       logService.addLog(this.lineBuffer.replace(/\r/g, ''), 'rx');
       this.lineBuffer = '';
@@ -188,42 +251,43 @@ export class SerialService {
 
     if (this.reader) {
       try {
-        await this.reader.cancel();
+        await this.reader.cancel().catch(() => {});
       } catch {
-        // Ignore cancel errors on shutdown
+        // Ignore cancel errors
       }
       try {
         this.reader.releaseLock();
       } catch {
-        // Ignore lock release errors
+        // Ignore unlock errors
       }
       this.reader = null;
     }
 
     if (this.writer) {
       try {
-        await this.writer.close();
+        await this.writer.close().catch(() => {});
       } catch {
         // Ignore close errors
       }
       try {
         this.writer.releaseLock();
       } catch {
-        // Ignore lock release errors
+        // Ignore unlock errors
       }
       this.writer = null;
     }
 
     if (this.currentPort) {
       try {
-        await this.currentPort.close();
+        await this.currentPort.close().catch(() => {});
       } catch {
         // Ignore port close errors
       }
       this.currentPort = null;
     }
 
-    logService.addLog('Serial monitor closed.', 'system');
+    this.releaseOwnership('monitor');
+    logService.addLog('Serial monitor closed cleanly.', 'system');
   }
 
   /**
@@ -237,7 +301,7 @@ export class SerialService {
         requestToSend: rts,
       });
     } catch (err) {
-      console.warn('Could not set serial signals:', err);
+      console.warn('Could not set serial control signals:', err);
     }
   }
 }
