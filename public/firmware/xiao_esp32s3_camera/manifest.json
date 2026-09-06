@@ -1,0 +1,27 @@
+{
+  "name": "XIAO ESP32S3 Camera",
+  "version": "1.0.0",
+  "chip": "ESP32-S3",
+  "board": "Seeed Studio XIAO ESP32S3 Sense",
+  "description": "Stage 1 Camera and MicroSD diagnostics firmware for Seeed Studio XIAO ESP32S3 Sense.",
+  "flash_size": "8MB",
+  "flash_mode": "dio",
+  "flash_freq": "80m",
+  "files": [
+    {
+      "path": "bootloader.bin",
+      "offset": "0x0",
+      "description": "ESP32-S3 2nd stage ROM bootloader"
+    },
+    {
+      "path": "partitions.bin",
+      "offset": "0x8000",
+      "description": "ESP32-S3 partition table"
+    },
+    {
+      "path": "firmware.bin",
+      "offset": "0x10000",
+      "description": "XIAO ESP32S3 Sense Stage 1 camera firmware application"
+    }
+  ]
+}
