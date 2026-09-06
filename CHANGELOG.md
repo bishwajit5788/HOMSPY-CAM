@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0-rc.3] - 2026-09-07
+
+### Release Status
+> **SOFTWARE RELEASE CANDIDATE 3 — VERIFIED ARCHITECTURE & REAL HARDWARE READY**  
+> *Notice: Software architecture, automated unit tests (72 tests across 8 suites), rollback baseline protection, and CI checks pass cleanly. Real physical hardware bench testing remains required for silicon verification.*
+
+### Fixed
+- **Firmware Image Header Validation Diagnostics**:
+  - Structured memory address overlap diagnostics now include the computed overlap size in bytes and hex address ranges without hardcoding.
+  - Standardized deterministic hard errors for missing/invalid ESP32 image magic byte (`0xE9`) and invalid `append_digest` header fields (must be 0 or 1).
+- **Physical Flash Capacity Contract**:
+  - Maintained security requirement that only physically detected flash capacity (`detected:<size>`) is accepted for memory boundary safety calculations, explicitly rejecting un-prefixed UI configuration strings to prevent spoofing.
+  - Aligned unit tests to test `detected:<size>` mappings and verify rejection of un-prefixed values.
+- **Rollback Baseline Protection & Monotonicity**:
+  - `FirmwareRollbackService` now strictly blocks malformed or empty version strings on trusted firmware releases.
+  - Enforced monotonic baseline preservation: recording a lower version can never downgrade a previously recorded higher trusted baseline.
+  - Stored baseline records in `localStorage` are safely validated on retrieval against corrupt or malformed structures.
+  - Allows re-flashing the identical trusted release with matching package fingerprint for safe board repair.
+  - Unverified custom firmware remains exempt from rollback restrictions.
+- **Web Crypto BufferSource Compatibility**:
+  - Backed `Uint8Array` in `base64ToBytes` with an explicit `ArrayBuffer` to resolve TypeScript compilation errors (`TS2769` / `TS2345`) with `crypto.subtle.importKey` and `crypto.subtle.verify`.
+- **Version and Metadata Consistency**:
+  - Synchronized version references to `0.9.0-rc.3` across `package.json`, `App.tsx`, `Header.tsx`, `README.md`, and `CHANGELOG.md`.
+- **Test Suite Expansion**:
+  - Expanded test coverage to 72 automated unit tests across 8 test suites.
+
 ## [0.9.0-rc.2] - 2026-09-07
 
 ### Release Status

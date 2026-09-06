@@ -105,7 +105,7 @@ export function App() {
     });
 
     // Initial system log
-    logService.addLog('ESP32-S3 Programmer v0.9.0-rc.1 initialized.', 'system');
+    logService.addLog('ESP32-S3 Programmer v0.9.0-rc.3 initialized.', 'system');
     if (!browserInfo.isSupported) {
       logService.addLog(`Warning: ${browserInfo.message}`, 'error');
     }

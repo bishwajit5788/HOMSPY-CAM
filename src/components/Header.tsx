@@ -65,7 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h1 className="header-title">ESP32-S3 Programmer</h1>
-              <span className="version-pill">v0.9.0-rc.2</span>
+              <span className="version-pill">v0.9.0-rc.3</span>
             </div>
             <p className="header-subtitle">
               Native Web Serial Flasher & Diagnostics for <strong>Seeed Studio XIAO ESP32S3 Sense</strong>

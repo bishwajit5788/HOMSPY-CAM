@@ -1,8 +1,8 @@
 # ESP32-S3 Programmer — Seeed Studio XIAO ESP32S3 Sense
 
 [![CI Pipeline](https://github.com/bishwajit5788/HOMSPY-CAM/actions/workflows/ci.yml/badge.svg)](https://github.com/bishwajit5788/HOMSPY-CAM/actions/workflows/ci.yml)
-![Release Candidate](https://img.shields.io/badge/version-v0.9.0--rc.2-blue.svg)
-![Status](https://img.shields.io/badge/status-Release%20Candidate%202-orange.svg)
+![Release Candidate](https://img.shields.io/badge/version-v0.9.0--rc.3-blue.svg)
+![Status](https://img.shields.io/badge/status-Release%20Candidate%203-orange.svg)
 ![Hardware Readiness](https://img.shields.io/badge/hardware%20readiness-Ready%20for%20Validation-yellow.svg)
 
 > **Production-grade Web Serial programmer, flasher, and serial diagnostics console for the Seeed Studio XIAO ESP32S3 Sense and ESP32-S3 devices.**
@@ -12,10 +12,10 @@
 ## Verification & Readiness Status
 
 > [!IMPORTANT]
-> **Release Status:** `v0.9.0-rc.2` — **SOFTWARE RELEASE CANDIDATE 2 — READY FOR REAL HARDWARE VALIDATION**
+> **Release Status:** `v0.9.0-rc.3` — **SOFTWARE RELEASE CANDIDATE 3 — READY FOR REAL HARDWARE VALIDATION**
 >
-> * **Software Verified:** Web Serial integration, unified `PortCoordinator` with exclusive lease management, timeout cancellation & stream cleanup (`withTimeoutAndCleanup`), and Content Security Policy (CSP).
-> * **Automated-Test Verified:** 58 unit tests across 6 test suites in Vitest covering firmware manifest schema, 4-byte offset alignment, address overlap detection, safe unknown flash capacity, hard error image header validation, guarded state transitions, monotonic operation tokens, and port lease conflict handling.
+> * **Software Verified:** Web Serial integration, unified `PortCoordinator` with exclusive lease management, timeout cancellation & stream cleanup (`withTimeoutAndCleanup`), manifest cryptographic signature verification, rollback baseline protection, and Content Security Policy (CSP).
+> * **Automated-Test Verified:** 72 unit tests across 8 test suites in Vitest covering firmware manifest schema, 4-byte offset alignment, address overlap detection, safe unknown flash capacity, hard error image header validation, guarded state transitions, monotonic operation tokens, rollback protection & recovery, and port lease conflict handling.
 > * **Build / CI Verified:** Zero TypeScript errors (`tsc -b`), zero oxlint warnings, Vite production bundle generated, firmware integrity check script (`npm run verify:firmware`), security audit (`npm audit --audit-level=high`), and GitHub Actions CI matrix configured for Node 20.x & 22.x.
 > * **Hardware Dependent / Hardware NOT Verified:** Physical silicon flash timing, ROM bootloader auto-sync on specific host USB controllers, OV2640 camera streaming, and MicroSD card FAT32 mounting require physical hardware bench testing using the 17-step protocol below.
 

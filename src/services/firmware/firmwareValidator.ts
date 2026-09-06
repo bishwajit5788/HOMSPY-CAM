@@ -37,15 +37,27 @@ export class FirmwareValidator {
       if (bin.offsetNum === 0 || bin.offsetNum >= 0x10000) {
         if (bin.data.byteLength < ESP_IMAGE_HEADER_SIZE) errors.push({ field: `files[${idx}].header`, message: `Executable image "${bin.fileName}" is too small; minimum 24 bytes required.`, severity: 'error' });
         else {
-          if (bin.data[0] !== ESP_IMAGE_MAGIC) errors.push({ field: `files[${idx}].header`, message: `Invalid ESP image magic in "${bin.fileName}"; missing mandatory ESP image magic byte; expected 0xE9.`, severity: 'error' });
+          if (bin.data[0] !== ESP_IMAGE_MAGIC) errors.push({ field: `files[${idx}].header`, message: `Invalid ESP32 image magic byte in "${bin.fileName}"; missing mandatory ESP32 image magic byte; expected 0xE9 (found 0x${bin.data[0].toString(16).padStart(2, '0').toUpperCase()}).`, severity: 'error' });
           const chipId = bin.data[12] | (bin.data[13] << 8);
           if (expectedChip.toUpperCase().includes('ESP32-S3') && chipId !== ESP32_S3_CHIP_ID) { const detectedName = ESP_CHIP_IDS[chipId] || `Unknown (0x${chipId.toString(16).padStart(4, '0')})`; errors.push({ field: `files[${idx}].chip_id`, message: `Chip architecture mismatch in "${bin.fileName}"; header chip ID is 0x${chipId.toString(16).padStart(4, '0')} (${detectedName}), expected ESP32-S3 (0x0009).`, severity: 'error' }); }
-          if (bin.data[23] !== 0 && bin.data[23] !== 1) errors.push({ field: `files[${idx}].header`, message: `Invalid append_digest/hash_appended field in "${bin.fileName}"; expected 0 or 1.`, severity: 'error' });
+          if (bin.data[23] !== 0 && bin.data[23] !== 1) errors.push({ field: `files[${idx}].header`, message: `Invalid append_digest header field in "${bin.fileName}"; expected 0 or 1 (found ${bin.data[23]}).`, severity: 'error' });
         }
       }
     }
     const sorted = [...pkg.files].sort((a, b) => a.offsetNum - b.offsetNum);
-    for (let i = 0; i < sorted.length - 1; i++) { const end = sorted[i].offsetNum + sorted[i].size; if (!Number.isSafeInteger(end) || end < sorted[i].offsetNum) errors.push({ field: 'address_overflow', message: `Address range overflow detected for "${sorted[i].fileName}".`, severity: 'error' }); else if (end > sorted[i + 1].offsetNum) errors.push({ field: 'address_overlap', message: `Memory range "${sorted[i].fileName}" overlaps with "${sorted[i + 1].fileName}".`, severity: 'error' }); }
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const end = sorted[i].offsetNum + sorted[i].size;
+      if (!Number.isSafeInteger(end) || end < sorted[i].offsetNum) {
+        errors.push({ field: 'address_overflow', message: `Address range overflow detected for "${sorted[i].fileName}".`, severity: 'error' });
+      } else if (end > sorted[i + 1].offsetNum) {
+        const overlapBytes = end - sorted[i + 1].offsetNum;
+        errors.push({
+          field: 'address_overlap',
+          message: `Memory range "${sorted[i].fileName}" overlaps with "${sorted[i + 1].fileName}" by ${overlapBytes} bytes (0x${sorted[i + 1].offsetNum.toString(16)} - 0x${end.toString(16)}).`,
+          severity: 'error',
+        });
+      }
+    }
     let flashCapacityStatus: FlashCapacityStatus = 'verified';
     if (!detectedCapacityBytes || detectedCapacityBytes <= 0) { flashCapacityStatus = 'unknown'; warnings.push({ field: 'flash_capacity', message: 'Target flash capacity is UNKNOWN. Flash boundary safety cannot be verified automatically.', severity: 'warning' }); } else if (!Number.isSafeInteger(detectedCapacityBytes)) { flashCapacityStatus = 'unknown'; errors.push({ field: 'flash_capacity', message: 'Detected flash capacity is not a safe integer.', severity: 'error' }); } else { for (const bin of pkg.files) { const end = bin.offsetNum + bin.size; if (!Number.isSafeInteger(end) || end < bin.offsetNum) { flashCapacityStatus = 'exceeded'; errors.push({ field: 'flash_capacity', message: `Address overflow detected for "${bin.fileName}".`, severity: 'error' }); } else if (end > detectedCapacityBytes) { flashCapacityStatus = 'exceeded'; errors.push({ field: 'flash_capacity', message: `File "${bin.fileName}" exceeds detected flash capacity.`, severity: 'error' }); } } }
     return { isValid: errors.length === 0, errors, warnings, flashCapacityStatus };

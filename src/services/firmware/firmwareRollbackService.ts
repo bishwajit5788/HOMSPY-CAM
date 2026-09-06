@@ -27,7 +27,10 @@ function key(pkg: FirmwarePackage): string {
 
 class FirmwareRollbackService {
   public check(pkg: FirmwarePackage): { allowed: boolean; reason?: string } {
-    if (pkg.trustLevel === 'unverified_custom' || !parseVersion(pkg.version)) return { allowed: true };
+    if (pkg.trustLevel === 'unverified_custom') return { allowed: true };
+    if (!pkg.version || !parseVersion(pkg.version)) {
+      return { allowed: false, reason: 'Rollback validation failed: trusted firmware release contains a malformed version string.' };
+    }
     const record = this.get();
     if (!record) return { allowed: true };
     const cmp = compareVersions(pkg.version, record.version);
@@ -37,14 +40,32 @@ class FirmwareRollbackService {
   }
 
   public recordSuccessfulFlash(pkg: FirmwarePackage): void {
-    if (pkg.trustLevel === 'unverified_custom' || !parseVersion(pkg.version)) return;
+    if (pkg.trustLevel === 'unverified_custom' || !pkg.version || !parseVersion(pkg.version)) return;
+    const existing = this.get();
+    if (existing) {
+      const cmp = compareVersions(pkg.version, existing.version);
+      if (cmp < 0) return;
+      if (cmp === 0 && key(pkg) !== existing.packageKey) return;
+    }
     this.save({ version: pkg.version, packageKey: key(pkg), installedAt: Date.now() });
   }
 
   public get(): ReleaseRecord | null {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) as ReleaseRecord : null;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        typeof (parsed as ReleaseRecord).version !== 'string' ||
+        typeof (parsed as ReleaseRecord).packageKey !== 'string' ||
+        typeof (parsed as ReleaseRecord).installedAt !== 'number' ||
+        !parseVersion((parsed as ReleaseRecord).version)
+      ) {
+        return null;
+      }
+      return parsed as ReleaseRecord;
     } catch { return null; }
   }
 

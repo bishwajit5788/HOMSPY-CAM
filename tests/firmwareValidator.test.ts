@@ -484,15 +484,23 @@ describe('FirmwareValidator', () => {
   });
 
   describe('parseFlashCapacityBytes', () => {
-    it('correctly maps known flash capacity strings to byte quantities', () => {
-      expect(FirmwareValidator.parseFlashCapacityBytes('4MB')).toBe(4 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('8MB')).toBe(8 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('16MB')).toBe(16 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('32MB')).toBe(32 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('2MB')).toBe(2 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('1MB')).toBe(1 * 1024 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('512KB')).toBe(512 * 1024);
-      expect(FirmwareValidator.parseFlashCapacityBytes('256KB')).toBe(256 * 1024);
+    it('correctly maps known physically detected flash capacity strings to byte quantities', () => {
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:4MB')).toBe(4 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:8MB')).toBe(8 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:16MB')).toBe(16 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:32MB')).toBe(32 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:2MB')).toBe(2 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:1MB')).toBe(1 * 1024 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:512KB')).toBe(512 * 1024);
+      expect(FirmwareValidator.parseFlashCapacityBytes('detected:256KB')).toBe(256 * 1024);
+    });
+
+    it('rejects UI-configured or un-prefixed flash capacity strings (returns null to prevent spoofing)', () => {
+      expect(FirmwareValidator.parseFlashCapacityBytes('4MB')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('8MB')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('16MB')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('32MB')).toBeNull();
+      expect(FirmwareValidator.parseFlashCapacityBytes('configured:8MB')).toBeNull();
     });
 
     it('returns null for undefined, empty, or unknown strings (NO 8MB fallback)', () => {
