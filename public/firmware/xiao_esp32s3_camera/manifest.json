@@ -29,5 +29,10 @@
       "sha256": "b64ced8dfc22162e4039cf08b327c515e89f013e53e96126ff590e17b4053b80",
       "description": "XIAO ESP32S3 Sense Stage 1 camera firmware application"
     }
-  ]
+  ],
+  "signature": {
+    "algorithm": "ECDSA-P256-SHA256",
+    "keyId": "homspy-release-2026-p256",
+    "signature": "ANoJVYpvMQU1yjQQ52wsx44sibZd0o1i15lUNskwT48hAKC9ClxC9CA50hO8hhAZUjzIx++xcw2Lm1WP9EtMGA=="
+  }
 }
