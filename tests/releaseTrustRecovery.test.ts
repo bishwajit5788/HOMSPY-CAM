@@ -12,7 +12,7 @@ const signedManifest: FirmwareManifest = {
     { path: 'partitions.bin', offset: '0x8000', size: 3072, sha256: '4a9422466b91248595e6bbb0d3ee1729330025533ade771bf52d77620957fd55', description: 'ESP32-S3 partition table' },
     { path: 'firmware.bin', offset: '0x10000', size: 32820, sha256: 'b64ced8dfc22162e4039cf08b327c515e89f013e53e96126ff590e17b4053b80', description: 'XIAO ESP32S3 Sense Stage 1 camera firmware application' },
   ],
-  signature: { algorithm: 'ECDSA-P256-SHA256', keyId: 'homspy-release-2026-p256', signature: 'ANoJVYpvMQU1yjQQ52wsx44sibZd0o1i15lUNskwT48hAKC9ClxC9CA50hO8hhAZUjzIx++xcw2Lm1WP9EtMGA==' },
+  signature: { algorithm: 'ECDSA-P256-SHA256', keyId: 'homspy-release-2026-p256', signature: 'HMM7G/fRIX/NXlUFoUXP25vwRvsKgrb3VMvWkNzjUA1jySDp2JxneRqXDymVAGbiwCsbPlbKLLlzeG4x7hRynw==' },
 };
 
 const pkg = (version: string, name = 'Test Release'): FirmwarePackage => ({
